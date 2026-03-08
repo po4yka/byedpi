@@ -99,6 +99,9 @@ fn build_listener(config: &RuntimeConfig) -> io::Result<MioTcpListener> {
 fn handle_client(mut client: TcpStream, state: &RuntimeState) -> io::Result<()> {
     client.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     client.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    if state.config.transparent {
+        return handle_transparent(client, state);
+    }
     if state.config.http_connect {
         return handle_http_connect(client, state);
     }
@@ -112,6 +115,30 @@ fn handle_client(mut client: TcpStream, state: &RuntimeState) -> io::Result<()> 
             io::ErrorKind::InvalidData,
             "unsupported proxy protocol",
         )),
+    }
+}
+
+fn handle_transparent(client: TcpStream, state: &RuntimeState) -> io::Result<()> {
+    let target = platform::original_dst(&client)?;
+    let local = client.local_addr()?;
+    if local == target {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "transparent proxy target resolves to the local listener",
+        ));
+    }
+
+    match connect_target(target, state) {
+        Ok((upstream, route)) => relay(client, upstream, state, target, route),
+        Err(err) => {
+            if matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut
+            ) {
+                let _ = SockRef::from(&client).set_linger(Some(Duration::ZERO));
+            }
+            Err(err)
+        }
     }
 }
 
@@ -212,7 +239,7 @@ fn handle_http_connect(mut client: TcpStream, state: &RuntimeState) -> io::Resul
 }
 
 fn handle_socks5_udp_associate(mut client: TcpStream, state: &RuntimeState) -> io::Result<()> {
-    let relay = build_udp_relay_socket(client.local_addr()?.ip())?;
+    let relay = build_udp_relay_socket(client.local_addr()?.ip(), state.config.protect_path.as_deref())?;
     let reply_addr = relay.local_addr()?;
     client.write_all(encode_socks5_reply(0, reply_addr).as_bytes())?;
 
@@ -411,9 +438,18 @@ fn connect_target_via_group(
         .get(group_index)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing desync group"))?;
     let stream = if let Some(upstream) = group.ext_socks {
-        connect_via_socks(target, upstream.addr, state.config.listen.bind_ip)
+        connect_via_socks(
+            target,
+            upstream.addr,
+            state.config.listen.bind_ip,
+            state.config.protect_path.as_deref(),
+        )
     } else {
-        connect_socket(target, state.config.listen.bind_ip)
+        connect_socket(
+            target,
+            state.config.listen.bind_ip,
+            state.config.protect_path.as_deref(),
+        )
     }?;
 
     if group.drop_sack {
@@ -422,8 +458,13 @@ fn connect_target_via_group(
     Ok(stream)
 }
 
-fn connect_via_socks(target: SocketAddr, upstream: SocketAddr, bind_ip: IpAddr) -> io::Result<TcpStream> {
-    let mut stream = connect_socket(upstream, bind_ip)?;
+fn connect_via_socks(
+    target: SocketAddr,
+    upstream: SocketAddr,
+    bind_ip: IpAddr,
+    protect_path: Option<&str>,
+) -> io::Result<TcpStream> {
+    let mut stream = connect_socket(upstream, bind_ip, protect_path)?;
     stream.write_all(&[S_VER5, 1, S_AUTH_NONE])?;
     let mut auth = [0u8; 2];
     stream.read_exact(&mut auth)?;
@@ -491,7 +532,7 @@ fn read_upstream_socks_reply(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn build_udp_relay_socket(ip: IpAddr) -> io::Result<UdpSocket> {
+fn build_udp_relay_socket(ip: IpAddr, protect_path: Option<&str>) -> io::Result<UdpSocket> {
     let bind_addr = SocketAddr::new(ip, 0);
     let domain = match bind_addr {
         SocketAddr::V4(_) => Domain::IPV4,
@@ -499,6 +540,9 @@ fn build_udp_relay_socket(ip: IpAddr) -> io::Result<UdpSocket> {
     };
     let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
+    if let Some(path) = protect_path {
+        platform::protect_socket(&socket, path)?;
+    }
     socket.bind(&SockAddr::from(bind_addr))?;
     let socket: UdpSocket = socket.into();
     socket.set_read_timeout(Some(Duration::from_millis(250)))?;
@@ -635,12 +679,19 @@ fn set_udp_ttl(relay: &UdpSocket, target: SocketAddr, ttl: u8) -> io::Result<()>
     }
 }
 
-fn connect_socket(target: SocketAddr, bind_ip: IpAddr) -> io::Result<TcpStream> {
+fn connect_socket(
+    target: SocketAddr,
+    bind_ip: IpAddr,
+    protect_path: Option<&str>,
+) -> io::Result<TcpStream> {
     let domain = match target {
         SocketAddr::V4(_) => Domain::IPV4,
         SocketAddr::V6(_) => Domain::IPV6,
     };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    if let Some(path) = protect_path {
+        platform::protect_socket(&socket, path)?;
+    }
     bind_socket(&socket, bind_ip, target)?;
     socket.connect(&SockAddr::from(target))?;
     let stream: TcpStream = socket.into();

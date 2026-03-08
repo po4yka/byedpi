@@ -1,8 +1,20 @@
 use std::io;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
+use std::os::fd::AsRawFd;
 
 pub fn set_tcp_md5sig(_stream: &TcpStream, _key_len: u16) -> io::Result<()> {
     Ok(())
+}
+
+pub fn protect_socket<T: AsRawFd>(_socket: &T, _path: &str) -> io::Result<()> {
+    Ok(())
+}
+
+pub fn original_dst(_stream: &TcpStream) -> io::Result<SocketAddr> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "transparent proxy mode is linux-only",
+    ))
 }
 
 pub fn attach_drop_sack(_stream: &TcpStream) -> io::Result<()> {

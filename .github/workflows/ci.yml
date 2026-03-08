@@ -18,7 +18,7 @@ jobs:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux packet capture and routing tooling
-        run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2
+        run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2 iptables
       - name: Run Linux contract and differential suite
         run: make test
       - name: Run sanitizer suite
@@ -34,7 +34,7 @@ jobs:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux packet capture and routing tooling
-        run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2
+        run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2 iptables
       - name: Run full nightly verification
         run: |
           make test

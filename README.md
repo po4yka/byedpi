@@ -18,8 +18,10 @@ make fuzz-packets
 - `make test` also runs runtime parity checks for cache-backed connect fallback plus `redirect`, `ssl_err`, and `torst` auto-trigger replay behavior
 - `make test` also runs desync runtime regression checks against oracle output and Linux loopback packet-capture checks when `tcpdump` is available
 - `make test` also runs Linux routed namespace tests for `fake`, `md5sig`, and `drop-sack` when `ip netns` and passwordless `sudo` are available
+- `make test` also runs Linux socket-feature tests for `--transparent` and `--protect-path` when the required namespace and packet-filter tooling is available
 - `make test` builds `ciadpi-rs`, runs the Rust oracle-diff suites, and checks `ciadpi-rs` against `ciadpi` for `--help`, `--version`, and parse-failure CLI parity
 - `make test` also runs the desync runtime, auto-trigger parity, and Linux routed namespace suites against `ciadpi-rs`, so stream-visible tampering and routed fake-path behavior stay gated on the Rust binary too
+- `make test` also runs the Linux transparent/protect-path socket-feature suite against `ciadpi-rs`
 - `make test` also runs a Rust-only proxy subset for SOCKS4, SOCKS5 CONNECT, SOCKS5 UDP associate, HTTP CONNECT, UDP fake bursts, TLS tunnel relay, churn, no-domain/no-udp rejection, connect failure handling, SOCKS chaining, and IPv6 where available
 - `make test-sanitize` reruns those tests with AddressSanitizer and UndefinedBehaviorSanitizer
 - `make fuzz-packets` runs a standalone mutation-based fuzz smoke test over the packet corpus

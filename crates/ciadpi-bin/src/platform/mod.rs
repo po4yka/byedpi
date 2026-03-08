@@ -1,5 +1,6 @@
 use std::io;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
+use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -25,6 +26,26 @@ pub fn set_tcp_md5sig(stream: &TcpStream, key_len: u16) -> io::Result<()> {
 #[cfg(not(target_os = "linux"))]
 pub fn set_tcp_md5sig(stream: &TcpStream, key_len: u16) -> io::Result<()> {
     stub::set_tcp_md5sig(stream, key_len)
+}
+
+#[cfg(target_os = "linux")]
+pub fn protect_socket<T: AsRawFd>(socket: &T, path: &str) -> io::Result<()> {
+    linux::protect_socket(socket, path)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn protect_socket<T: AsRawFd>(socket: &T, path: &str) -> io::Result<()> {
+    stub::protect_socket(socket, path)
+}
+
+#[cfg(target_os = "linux")]
+pub fn original_dst(stream: &TcpStream) -> io::Result<SocketAddr> {
+    linux::original_dst(stream)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn original_dst(stream: &TcpStream) -> io::Result<SocketAddr> {
+    stub::original_dst(stream)
 }
 
 #[cfg(target_os = "linux")]
