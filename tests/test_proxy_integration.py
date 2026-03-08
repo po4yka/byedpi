@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import socket
 import socketserver
 import ssl
@@ -15,57 +16,6 @@ import time
 import unittest
 from pathlib import Path
 
-
-CERT_PEM = """-----BEGIN CERTIFICATE-----
-MIIDCTCCAfGgAwIBAgIUNHzOdMf9dGGL2tmXNwxjXznzz5swDQYJKoZIhvcNAQEL
-BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDMwODA5NDU1NFoXDTM2MDMw
-NTA5NDU1NFowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
-AAOCAQ8AMIIBCgKCAQEAobW3Y2yt3W6MlhC7A+DJVstApSRl8hlz+eT/oD6mtLiF
-NIMCdTX8aicTVJblQox17r3FzAUa5fbNWMcEJX8bLDqIiIrMOs/CHgg1sRBG+31H
-/UpWAhlvuUNt0iFLxt6hMxmdWC9H9+J++g025DUslxth1jIl1yv9yr+OsSPJifeO
-AFx8EDx0C3oNbdj1cn4aMdNoxOoqLgT3kubDgRujKT+yz+Ld+KjHJ/N5y/QyFZMj
-8PSAQoYE+F9BGVm21Vy3SNLZAznzjZ77TbGh812GEmE8AWmtUbSN3pxFhVXhKu6L
-2F42Q8zDcIIunDvIZsB08GmtXafjwQIaVq0Qy3mDlwIDAQABo1MwUTAdBgNVHQ4E
-FgQUzeEMh/A0N2ApwKsSEyoYVTdpnLswHwYDVR0jBBgwFoAUzeEMh/A0N2ApwKsS
-EyoYVTdpnLswDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAInSw
-5XPBNr4cuwLHmvdanIO/ZSATl6Ycb9G1twFu0ekqRUOn2hga1LDAzeEko9SAPMVX
-uiYoIYLTUD/qWHAPNlbxQfsaZPIeI2FC+2qmTs/0k8QCyVITJIIpasEoEWUuqPTM
-TQWbKDRTtrIjUv/+Veba5htMegJWdFtF9q9EKrFPD/Qd2eWU/7BewCDjckWRTRzR
-TwkW/kEI9Io3joJaRKsvvCSN4DAQBXKWsIwAAX9o8aL/mR9c66m31E+0RENbb6w0
-HBmxOBcrP6jmZe7tQQcHFAeKs3OyMu0BFZYbUxM8oDjfDdX7K3BzeKjFKYm+TN+X
-suSBhL01UUPGBdJaPg==
------END CERTIFICATE-----
-"""
-
-KEY_PEM = """-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQChtbdjbK3dboyW
-ELsD4MlWy0ClJGXyGXP55P+gPqa0uIU0gwJ1NfxqJxNUluVCjHXuvcXMBRrl9s1Y
-xwQlfxssOoiIisw6z8IeCDWxEEb7fUf9SlYCGW+5Q23SIUvG3qEzGZ1YL0f34n76
-DTbkNSyXG2HWMiXXK/3Kv46xI8mJ944AXHwQPHQLeg1t2PVyfhox02jE6iouBPeS
-5sOBG6MpP7LP4t34qMcn83nL9DIVkyPw9IBChgT4X0EZWbbVXLdI0tkDOfONnvtN
-saHzXYYSYTwBaa1RtI3enEWFVeEq7ovYXjZDzMNwgi6cO8hmwHTwaa1dp+PBAhpW
-rRDLeYOXAgMBAAECggEAFCSHGV1aMtt9q4ZIpUJaEfOeCR6wNtMw0mR8lZX4PJ6X
-XmPLPz+1l0toFFX6F1YDrUn6L2BGFMsEkmsH0IaKo0cPPA197v1zV+ZR5Hel6oGV
-IVnMaNUznhy7Zec71yO4FJ4Q2VaFB72GGi43M385dKu2fhsfrN5lQzH6hi9yVTr2
-uB2lEy0HloFRc8oBuVaELWI7VPSDe2Zszgxm9km6/h7RRb1jZc+wTNpTct1IsNLR
-aX+VyT4AOhQW+Y/PTQNQLh98Dv0b9qtkSUNvZCuXamVyrSfZ0B1/3BWKnz3KB0G/
-EMgkKqNALyTXr9MjLHLFyc4FYNQuTBkFqWf+yTCdkQKBgQDVdQfS35tZsDP5/T7F
-BdnYinkcgjT8zw5t+Arpz+XmqON/98LpzFy0JdmOJj//bTG8H90vb7AqmZzMK2xB
-RBeh331d4BTxlk8DaDQ+BJ72ei5e0DgIOKCEjiAlifs2xgWDpbuburvoNuOBA0ee
-zizDT3WRXlHXTujRi/1wO6IQYwKBgQDB8HGppSNOOB9WaRJwCuAVy4du+E5t1BAu
-8IRDJNJuoSBneCSvT62+8nbnMtzKlPPuhz0tzNeFcgveRGn+OnJkdKejSKfvo1SP
-B6OLirfCJZVHcOElPCOczUYJ4Uqx7fWbjRSjxcaSGkpmHj+lOqVPhHFtdtn5nwGg
-MDf+hTK0PQKBgQDHEUiFmbGomBIxHsMuPUGnl6RROQEvj+5WElAjM5alYXYhPq/R
-GJyQCQh2cCeZD32lg1XkylVRtUashgaEa3tapDGnnbYKg/IWLFUkTWzuUo3yMF9B
-E4ZneKB0QdU9hLlZx/NJzYE2lBHhnGxrpr3KO81aD8tlb5ri6Zom1AZVHwKBgHbD
-TIeLpgwvWBltbKoKLuGJ6pztF/Ivy91C0mvfr7GpoBNcwnJNA+QLzP6V6hlwj9SB
-ItjaORzyEwyArrvNhOG5gjL+ukCIr66LCf7Y6uDMbRb7rBRGOLS8C+je+wPs6dvg
-0EPeSFSOHwNcALOpLzR7sY5MGv2+/prfDFsjrEItAoGADLCHCyrvJLXaRDd9Tt52
-Q1GNUlUqqnJW3xvl+Ztns0Z8ljku95Pg3S1hmyPUSsa9lcTc5zpdRBmbY0dfhLWo
-uej1gPm071oEXNaXn6if74eXgJhZXSIat77pJzFggr3LncuzPf1MIqA/pPSBI/fk
-buZJqiWhFwDwdPSxLJL0zA4=
------END PRIVATE KEY-----
-"""
 
 PROXY_BINARY = ""
 
@@ -163,6 +113,38 @@ class TLSServer(ThreadingTCPServer):
     def get_request(self):
         sock, addr = super().get_request()
         return self._context.wrap_socket(sock, server_side=True), addr
+
+
+def generate_localhost_cert(tempdir: Path) -> tuple[Path, Path]:
+    certfile = tempdir / "cert.pem"
+    keyfile = tempdir / "key.pem"
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        raise unittest.SkipTest("openssl is unavailable")
+
+    cmd = [
+        openssl,
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-sha256",
+        "-nodes",
+        "-keyout",
+        str(keyfile),
+        "-out",
+        str(certfile),
+        "-days",
+        "1",
+        "-subj",
+        "/CN=localhost",
+        "-addext",
+        "subjectAltName=DNS:localhost,IP:127.0.0.1",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise AssertionError(f"openssl failed to generate localhost cert:\n{result.stderr}")
+    return certfile, keyfile
 
 
 class ProxyProcess:
@@ -389,10 +371,7 @@ class ProxyIntegrationTests(unittest.TestCase):
         return server
 
     def _tls_server(self) -> TLSServer:
-        certfile = Path(self._tmpdir.name) / "cert.pem"
-        keyfile = Path(self._tmpdir.name) / "key.pem"
-        certfile.write_text(CERT_PEM)
-        keyfile.write_text(KEY_PEM)
+        certfile, keyfile = generate_localhost_cert(Path(self._tmpdir.name))
         return TLSServer(str(certfile), str(keyfile))
 
     def _maybe_ipv6_server(self) -> socketserver.TCPServer | None:
