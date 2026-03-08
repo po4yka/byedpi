@@ -271,7 +271,10 @@ pub fn plan_tcp(group: &DesyncGroup, input: &[u8], seed: u32, default_ttl: u8) -
         });
         let chunk = tampered.bytes[lp as usize..pos as usize].to_vec();
         match part.mode {
-            DesyncMode::Split | DesyncMode::None => actions.push(DesyncAction::Write(chunk)),
+            DesyncMode::Split | DesyncMode::None => {
+                actions.push(DesyncAction::Write(chunk));
+                actions.push(DesyncAction::AwaitWritable);
+            }
             DesyncMode::Oob => actions.push(DesyncAction::WriteUrgent {
                 prefix: chunk,
                 urgent_byte: group.oob_data.unwrap_or(b'a'),
@@ -279,6 +282,7 @@ pub fn plan_tcp(group: &DesyncGroup, input: &[u8], seed: u32, default_ttl: u8) -
             DesyncMode::Disorder => {
                 actions.push(DesyncAction::SetTtl(1));
                 actions.push(DesyncAction::Write(chunk));
+                actions.push(DesyncAction::AwaitWritable);
                 actions.push(DesyncAction::RestoreDefaultTtl);
             }
             DesyncMode::Disoob => {
@@ -287,6 +291,7 @@ pub fn plan_tcp(group: &DesyncGroup, input: &[u8], seed: u32, default_ttl: u8) -
                     prefix: chunk,
                     urgent_byte: group.oob_data.unwrap_or(b'a'),
                 });
+                actions.push(DesyncAction::AwaitWritable);
                 actions.push(DesyncAction::RestoreDefaultTtl);
             }
             DesyncMode::Fake => {
@@ -306,6 +311,9 @@ pub fn plan_tcp(group: &DesyncGroup, input: &[u8], seed: u32, default_ttl: u8) -
                     actions.push(DesyncAction::SetTtl(default_ttl));
                 }
             }
+        }
+        if matches!(part.mode, DesyncMode::Oob) {
+            actions.push(DesyncAction::AwaitWritable);
         }
         lp = pos;
     }

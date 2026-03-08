@@ -59,3 +59,11 @@ pub fn send_fake_tcp(
     }
     Ok(())
 }
+
+pub fn wait_tcp_stage(
+    _stream: &TcpStream,
+    _wait_send: bool,
+    _await_interval: std::time::Duration,
+) -> io::Result<()> {
+    Ok(())
+}

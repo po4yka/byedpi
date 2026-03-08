@@ -251,7 +251,7 @@ pub fn send_fake_tcp(
     ttl: u8,
     md5sig: bool,
     default_ttl: u8,
-    _wait_send: bool,
+    wait_send: bool,
     await_interval: Duration,
 ) -> io::Result<()> {
     if original_prefix.is_empty() {
@@ -319,14 +319,13 @@ pub fn send_fake_tcp(
             moved += chunk as usize;
         }
 
+        wait_tcp_stage_fd(fd, wait_send, await_interval)?;
         if md5sig {
             set_tcp_md5sig(stream, 0)?;
         }
         if default_ttl != 0 {
             set_stream_ttl(stream, default_ttl)?;
         }
-
-        wait_until_no_notsent(fd, await_interval)?;
         write_region(region, original_prefix, region_len);
         Ok(())
     })();
@@ -351,6 +350,14 @@ pub fn send_fake_tcp(
     }
     free_region(region, region_len);
     result
+}
+
+pub fn wait_tcp_stage(
+    stream: &TcpStream,
+    wait_send: bool,
+    await_interval: Duration,
+) -> io::Result<()> {
+    wait_tcp_stage_fd(stream.as_raw_fd(), wait_send, await_interval)
 }
 
 fn peer_addr(fd: libc::c_int) -> io::Result<libc::sockaddr_storage> {
@@ -409,17 +416,23 @@ fn tcp_has_notsent(fd: libc::c_int) -> io::Result<bool> {
     Ok(outq != 0)
 }
 
-fn wait_until_no_notsent(fd: libc::c_int, await_interval: Duration) -> io::Result<()> {
+fn wait_tcp_stage_fd(fd: libc::c_int, wait_send: bool, await_interval: Duration) -> io::Result<()> {
     let sleep_for = if await_interval.is_zero() {
         Duration::from_millis(1)
     } else {
         await_interval
     };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    if wait_send {
+        thread::sleep(sleep_for);
         if !tcp_has_notsent(fd)? {
             return Ok(());
         }
+    } else if !tcp_has_notsent(fd)? {
+        return Ok(());
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
         if Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -427,6 +440,9 @@ fn wait_until_no_notsent(fd: libc::c_int, await_interval: Duration) -> io::Resul
             ));
         }
         thread::sleep(sleep_for);
+        if !tcp_has_notsent(fd)? {
+            return Ok(());
+        }
     }
 }
 

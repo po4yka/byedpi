@@ -433,6 +433,37 @@ class LinuxWireCaptureTests(unittest.TestCase):
         self.assertEqual(packets[0]["payload"], fake_payload[:8])
         self.assertEqual(packets[1]["payload"], payload[8:])
 
+    def test_wait_send_delays_split_chunks(self) -> None:
+        payload = packets_corpus("http_request.bin").read_bytes()
+        packets = self._capture_payloads(
+            payload,
+            ["--split", "8", "--wait-send", "--await-int", "40"],
+        )
+        self.assertGreaterEqual(len(packets), 2)
+        self.assertEqual(packets[0]["payload"], payload[:8])
+        self.assertEqual(packets[1]["payload"], payload[8:])
+        self.assertGreaterEqual(packets[1]["ts"] - packets[0]["ts"], 0.02)
+
+    def test_wait_send_delays_fake_retransmit(self) -> None:
+        payload = packets_corpus("http_request.bin").read_bytes()
+        fake_payload = b"GET /f HTTP/1.1\r\nHost: fake.example.test\r\n\r\n"
+        packets = self._capture_payloads(
+            payload,
+            [
+                "--fake",
+                "8",
+                "--wait-send",
+                "--await-int",
+                "40",
+                "--fake-data",
+                ":" + fake_payload.decode("ascii"),
+            ],
+        )
+        self.assertGreaterEqual(len(packets), 2)
+        self.assertEqual(packets[0]["payload"], fake_payload[:8])
+        self.assertEqual(packets[1]["payload"], payload[8:])
+        self.assertGreaterEqual(packets[1]["ts"] - packets[0]["ts"], 0.02)
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)

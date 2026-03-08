@@ -114,3 +114,21 @@ pub fn send_fake_tcp(
 ) -> io::Result<()> {
     stub::send_fake_tcp(stream, fake_prefix, ttl, md5sig, default_ttl)
 }
+
+#[cfg(target_os = "linux")]
+pub fn wait_tcp_stage(
+    stream: &TcpStream,
+    wait_send: bool,
+    await_interval: Duration,
+) -> io::Result<()> {
+    linux::wait_tcp_stage(stream, wait_send, await_interval)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn wait_tcp_stage(
+    stream: &TcpStream,
+    wait_send: bool,
+    await_interval: Duration,
+) -> io::Result<()> {
+    stub::wait_tcp_stage(stream, wait_send, await_interval)
+}

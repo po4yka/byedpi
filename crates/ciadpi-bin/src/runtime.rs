@@ -1544,7 +1544,13 @@ fn send_with_group(
             Ok(plan) if group.parts.iter().any(|part| part.mode == DesyncMode::Fake) => {
                 execute_tcp_plan(writer, config, group, &plan, seed)?
             }
-            Ok(plan) => execute_tcp_actions(writer, &plan.actions, config.default_ttl)?,
+            Ok(plan) => execute_tcp_actions(
+                writer,
+                &plan.actions,
+                config.default_ttl,
+                config.wait_send,
+                Duration::from_millis(config.await_interval.max(1) as u64),
+            )?,
             Err(_) => writer.write_all(payload)?,
         }
     } else {
@@ -1569,6 +1575,8 @@ fn execute_tcp_actions(
     writer: &mut TcpStream,
     actions: &[DesyncAction],
     default_ttl: u8,
+    wait_send: bool,
+    await_interval: Duration,
 ) -> io::Result<()> {
     for action in actions {
         match action {
@@ -1585,7 +1593,9 @@ fn execute_tcp_actions(
             DesyncAction::SetMd5Sig { key_len } => platform::set_tcp_md5sig(writer, *key_len)?,
             DesyncAction::AttachDropSack => {}
             DesyncAction::DetachDropSack => {}
-            DesyncAction::AwaitWritable => {}
+            DesyncAction::AwaitWritable => {
+                platform::wait_tcp_stage(writer, wait_send, await_interval)?
+            }
         }
     }
     Ok(())
@@ -1620,13 +1630,30 @@ fn execute_tcp_plan(
         let chunk = &plan.tampered[start..end];
 
         match step.mode {
-            DesyncMode::None | DesyncMode::Split => writer.write_all(chunk)?,
+            DesyncMode::None | DesyncMode::Split => {
+                writer.write_all(chunk)?;
+                platform::wait_tcp_stage(
+                    writer,
+                    config.wait_send,
+                    Duration::from_millis(config.await_interval.max(1) as u64),
+                )?;
+            }
             DesyncMode::Oob => {
-                send_out_of_band(writer, chunk, group.oob_data.unwrap_or(b'a'))?
+                send_out_of_band(writer, chunk, group.oob_data.unwrap_or(b'a'))?;
+                platform::wait_tcp_stage(
+                    writer,
+                    config.wait_send,
+                    Duration::from_millis(config.await_interval.max(1) as u64),
+                )?;
             }
             DesyncMode::Disorder => {
                 set_stream_ttl(writer, 1)?;
                 writer.write_all(chunk)?;
+                platform::wait_tcp_stage(
+                    writer,
+                    config.wait_send,
+                    Duration::from_millis(config.await_interval.max(1) as u64),
+                )?;
                 if config.default_ttl != 0 {
                     set_stream_ttl(writer, config.default_ttl)?;
                 }
@@ -1634,6 +1661,11 @@ fn execute_tcp_plan(
             DesyncMode::Disoob => {
                 set_stream_ttl(writer, 1)?;
                 send_out_of_band(writer, chunk, group.oob_data.unwrap_or(b'a'))?;
+                platform::wait_tcp_stage(
+                    writer,
+                    config.wait_send,
+                    Duration::from_millis(config.await_interval.max(1) as u64),
+                )?;
                 if config.default_ttl != 0 {
                     set_stream_ttl(writer, config.default_ttl)?;
                 }
