@@ -21,6 +21,24 @@ struct TcpMd5Sig {
 const SO_ORIGINAL_DST: libc::c_int = 80;
 const IP6T_SO_ORIGINAL_DST: libc::c_int = 80;
 
+pub fn enable_tcp_fastopen_connect<T: AsRawFd>(socket: &T) -> io::Result<()> {
+    let yes = 1i32;
+    let rc = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_FASTOPEN_CONNECT,
+            (&yes as *const i32).cast(),
+            size_of::<i32>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 pub fn set_tcp_md5sig(stream: &TcpStream, key_len: u16) -> io::Result<()> {
     if usize::from(key_len) > 80 {
         return Err(io::Error::new(

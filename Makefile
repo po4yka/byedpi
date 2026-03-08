@@ -137,10 +137,13 @@ test-rust-linux-runtime-features: rust-bin
 test-rust-runtime: rust-bin
 	$(PYTHON) $(TEST_DIR)/test_rust_runtime_subset.py --binary ./$(RUST_BIN)
 
+test-rust-runtime-migration: rust-bin
+	$(PYTHON) $(TEST_DIR)/test_rust_runtime_migration.py --binary ./$(RUST_BIN)
+
 bench-smoke: oracles packets-corpus Cargo.toml
 	$(CARGO) test -p ciadpi-packets benchmark_smoke -- --ignored --nocapture
 
-test: test-packets test-contract test-integration test-desync-runtime test-auto-runtime test-linux-routed-runtime test-linux-runtime-features test-rust test-rust-binary-parity test-rust-desync-runtime test-rust-auto-runtime test-rust-linux-routed-runtime test-rust-linux-runtime-features test-rust-runtime
+test: test-packets test-contract test-integration test-desync-runtime test-auto-runtime test-linux-routed-runtime test-linux-runtime-features test-rust test-rust-binary-parity test-rust-desync-runtime test-rust-auto-runtime test-rust-linux-routed-runtime test-rust-linux-runtime-features test-rust-runtime test-rust-runtime-migration
 
 test-sanitize: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_SAN_BIN) $(SAN_TARGET) oracles
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PACKETS_TEST_SAN_BIN) $(PACKETS_CORPUS_DIR)
@@ -162,4 +165,4 @@ install: $(TARGET)
 	mkdir -p $(INSTALL_DIR)
 	install -m 755 $(TARGET) $(INSTALL_DIR)
 
-.PHONY: all windows clean install oracles packets-corpus rust-bin test-packets test-contract test-integration test-desync-runtime test-auto-runtime test-linux-routed-runtime test-linux-runtime-features test-rust test-rust-binary-parity test-rust-desync-runtime test-rust-auto-runtime test-rust-linux-routed-runtime test-rust-linux-runtime-features test-rust-runtime bench-smoke test test-sanitize fuzz-packets
+.PHONY: all windows clean install oracles packets-corpus rust-bin test-packets test-contract test-integration test-desync-runtime test-auto-runtime test-linux-routed-runtime test-linux-runtime-features test-rust test-rust-binary-parity test-rust-desync-runtime test-rust-auto-runtime test-rust-linux-routed-runtime test-rust-linux-runtime-features test-rust-runtime test-rust-runtime-migration bench-smoke test test-sanitize fuzz-packets

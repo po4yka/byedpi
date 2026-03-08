@@ -12,7 +12,7 @@ ciadpi-session = { path = "../ciadpi-session" }
 mio = { version = "0.8", features = ["net", "os-poll"] }
 socket2 = "0.5"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [[bin]]

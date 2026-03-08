@@ -19,6 +19,16 @@ pub fn detect_default_ttl() -> io::Result<u8> {
 }
 
 #[cfg(target_os = "linux")]
+pub fn enable_tcp_fastopen_connect<T: AsRawFd>(socket: &T) -> io::Result<()> {
+    linux::enable_tcp_fastopen_connect(socket)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn enable_tcp_fastopen_connect<T: AsRawFd>(_socket: &T) -> io::Result<()> {
+    stub::enable_tcp_fastopen_connect()
+}
+
+#[cfg(target_os = "linux")]
 pub fn set_tcp_md5sig(stream: &TcpStream, key_len: u16) -> io::Result<()> {
     linux::set_tcp_md5sig(stream, key_len)
 }

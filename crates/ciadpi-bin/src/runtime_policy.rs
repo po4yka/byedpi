@@ -1,11 +1,11 @@
-use std::io;
+use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ciadpi_config::{
     dump_cache_entries, load_cache_entries_from_path, CacheEntry, DesyncGroup, RuntimeConfig,
-    DETECT_RECONN,
+    AUTO_NOPOST, AUTO_SORT, DETECT_RECONN,
 };
 use ciadpi_packets::{
     is_http, is_tls_client_hello, parse_http, parse_tls, IS_HTTP, IS_HTTPS, IS_IPV4, IS_TCP,
@@ -19,14 +19,24 @@ pub struct ConnectionRoute {
 }
 
 #[derive(Debug, Clone)]
+struct GroupPolicy {
+    detect: u32,
+    fail_count: i32,
+    pri: i32,
+}
+
+#[derive(Debug, Clone)]
 struct CacheRecord {
     entry: CacheEntry,
     group_index: usize,
+    attempted_mask: u64,
 }
 
 #[derive(Debug, Default)]
 pub struct RuntimeCache {
     records: Vec<CacheRecord>,
+    groups: Vec<GroupPolicy>,
+    order: Vec<usize>,
 }
 
 impl RuntimeCache {
@@ -40,10 +50,28 @@ impl RuntimeCache {
                 continue;
             }
             if let Ok(entries) = load_cache_entries_from_path(Path::new(path)) {
-                records.extend(entries.into_iter().map(|entry| CacheRecord { entry, group_index }));
+                records.extend(entries.into_iter().map(|entry| CacheRecord {
+                    entry,
+                    group_index,
+                    attempted_mask: 0,
+                }));
             }
         }
-        Self { records }
+        let groups = config
+            .groups
+            .iter()
+            .map(|group| GroupPolicy {
+                detect: group.detect,
+                fail_count: group.fail_count,
+                pri: group.pri,
+            })
+            .collect();
+        let order = (0..config.groups.len()).collect();
+        Self {
+            records,
+            groups,
+            order,
+        }
     }
 
     pub fn lookup(&mut self, config: &RuntimeConfig, dest: SocketAddr) -> Option<ConnectionRoute> {
@@ -54,7 +82,7 @@ impl RuntimeCache {
             .find(|record| cache_matches(&record.entry, dest))
             .map(|record| ConnectionRoute {
                 group_index: record.group_index,
-                attempted_mask: 0,
+                attempted_mask: record.attempted_mask,
             })
     }
 
@@ -63,6 +91,7 @@ impl RuntimeCache {
         config: &RuntimeConfig,
         dest: SocketAddr,
         group_index: usize,
+        attempted_mask: u64,
         host: Option<String>,
     ) -> io::Result<()> {
         let entry = CacheEntry {
@@ -75,13 +104,31 @@ impl RuntimeCache {
         if let Some(existing) = self
             .records
             .iter_mut()
-            .find(|record| record.group_index == group_index && cache_matches(&record.entry, dest))
+            .find(|record| cache_matches(&record.entry, dest))
         {
             existing.entry = entry;
+            existing.group_index = group_index;
+            existing.attempted_mask = attempted_mask;
         } else {
-            self.records.push(CacheRecord { entry, group_index });
+            self.records.push(CacheRecord {
+                entry,
+                group_index,
+                attempted_mask,
+            });
         }
         self.persist_group(config, group_index)
+    }
+
+    pub fn clear(&mut self, config: &RuntimeConfig, dest: SocketAddr) -> io::Result<()> {
+        let before = self.records.len();
+        self.records.retain(|record| !cache_matches(&record.entry, dest));
+        if self.records.len() == before {
+            return Ok(());
+        }
+        for group_index in 0..config.groups.len() {
+            self.persist_group(config, group_index)?;
+        }
+        Ok(())
     }
 
     fn persist_group(&self, config: &RuntimeConfig, group_index: usize) -> io::Result<()> {
@@ -99,6 +146,122 @@ impl RuntimeCache {
             .collect();
         std::fs::write(path, dump_cache_entries(&entries))
     }
+
+    pub fn dump_stdout_groups<W: Write>(&self, config: &RuntimeConfig, mut writer: W) -> io::Result<()> {
+        for (group_index, group) in config.groups.iter().enumerate() {
+            if group.cache_file.as_deref() != Some("-") {
+                continue;
+            }
+            let entries: Vec<_> = self
+                .records
+                .iter()
+                .filter(|record| record.group_index == group_index)
+                .map(|record| record.entry.clone())
+                .collect();
+            writer.write_all(dump_cache_entries(&entries).as_bytes())?;
+        }
+        writer.flush()
+    }
+
+    pub fn supports_trigger(&self, trigger: u32) -> bool {
+        self.groups
+            .iter()
+            .any(|group| group.detect != 0 && (group.detect & trigger) != 0)
+    }
+
+    pub fn advance_route(
+        &mut self,
+        config: &RuntimeConfig,
+        route: &ConnectionRoute,
+        dest: SocketAddr,
+        payload: Option<&[u8]>,
+        trigger: u32,
+        can_reconnect: bool,
+        host: Option<String>,
+    ) -> io::Result<Option<ConnectionRoute>> {
+        if !can_reconnect && (config.auto_level & AUTO_NOPOST) != 0 {
+            return Ok(None);
+        }
+
+        if let Some(group) = self.groups.get_mut(route.group_index) {
+            group.fail_count += 1;
+        }
+
+        let next = select_next_group(config, self, route, dest, payload, trigger, can_reconnect);
+
+        if (config.auto_level & AUTO_SORT) != 0 {
+            if let Some(ref next_route) = next {
+                let current_pri = self
+                    .groups
+                    .get(route.group_index)
+                    .map(|group| group.pri)
+                    .unwrap_or_default();
+                let next_pri = self
+                    .groups
+                    .get(next_route.group_index)
+                    .map(|group| group.pri)
+                    .unwrap_or_default();
+                if current_pri > next_pri {
+                    self.swap_groups(route.group_index, next_route.group_index);
+                }
+            }
+            if let Some(group) = self.groups.get_mut(route.group_index) {
+                group.pri += 1;
+            }
+        }
+
+        match next {
+            Some(next_route) => {
+                self.store(
+                    config,
+                    dest,
+                    next_route.group_index,
+                    next_route.attempted_mask,
+                    host,
+                )?;
+                Ok(Some(next_route))
+            }
+            None => {
+                self.clear(config, dest)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn detect_for(&self, config: &RuntimeConfig, group_index: usize) -> u32 {
+        self.groups
+            .get(group_index)
+            .map(|group| group.detect)
+            .unwrap_or_else(|| config.groups[group_index].detect)
+    }
+
+    fn ordered_indices(&self) -> &[usize] {
+        &self.order
+    }
+
+    fn swap_groups(&mut self, lhs: usize, rhs: usize) {
+        let Some(lhs_pos) = self.order.iter().position(|&index| index == lhs) else {
+            return;
+        };
+        let Some(rhs_pos) = self.order.iter().position(|&index| index == rhs) else {
+            return;
+        };
+        self.order.swap(lhs_pos, rhs_pos);
+        if lhs == rhs {
+            return;
+        }
+
+        let lhs_detect = self.groups.get(lhs).map(|group| group.detect);
+        let rhs_detect = self.groups.get(rhs).map(|group| group.detect);
+        if let (Some(lhs_detect), Some(rhs_detect)) = (lhs_detect, rhs_detect) {
+            if let Some(group) = self.groups.get_mut(lhs) {
+                group.detect = rhs_detect;
+            }
+            if let Some(group) = self.groups.get_mut(rhs) {
+                group.detect = lhs_detect;
+            }
+        }
+    }
 }
 
 pub fn select_initial_group(
@@ -106,20 +269,22 @@ pub fn select_initial_group(
     cache: &mut RuntimeCache,
     dest: SocketAddr,
     payload: Option<&[u8]>,
+    allow_unknown_payload: bool,
 ) -> Option<ConnectionRoute> {
     if let Some(route) = cache.lookup(config, dest) {
         let group = config.groups.get(route.group_index)?;
-        if group_matches(group, dest, payload) {
+        if group_matches(group, dest, payload, allow_unknown_payload) {
             return Some(route);
         }
     }
 
     let mut attempted_mask = 0u64;
-    for (idx, group) in config.groups.iter().enumerate() {
-        if group.detect != 0 {
+    for &idx in cache.ordered_indices() {
+        let group = config.groups.get(idx)?;
+        if cache.detect_for(config, idx) != 0 {
             continue;
         }
-        if group_matches(group, dest, payload) {
+        if group_matches(group, dest, payload, allow_unknown_payload) {
             return Some(ConnectionRoute {
                 group_index: idx,
                 attempted_mask,
@@ -132,6 +297,7 @@ pub fn select_initial_group(
 
 pub fn select_next_group(
     config: &RuntimeConfig,
+    cache: &RuntimeCache,
     route: &ConnectionRoute,
     dest: SocketAddr,
     payload: Option<&[u8]>,
@@ -139,19 +305,21 @@ pub fn select_next_group(
     can_reconnect: bool,
 ) -> Option<ConnectionRoute> {
     let mut attempted_mask = route.attempted_mask | config.groups[route.group_index].bit;
-    for (idx, group) in config.groups.iter().enumerate() {
+    for &idx in cache.ordered_indices() {
+        let group = config.groups.get(idx)?;
+        let detect = cache.detect_for(config, idx);
         if attempted_mask & group.bit != 0 {
             continue;
         }
-        if group.detect != 0 && (group.detect & trigger) == 0 {
+        if detect != 0 && (detect & trigger) == 0 {
             attempted_mask |= group.bit;
             continue;
         }
-        if (group.detect & DETECT_RECONN) != 0 && !can_reconnect {
+        if (detect & DETECT_RECONN) != 0 && !can_reconnect {
             attempted_mask |= group.bit;
             continue;
         }
-        if group_matches(group, dest, payload) {
+        if group_matches(group, dest, payload, false) {
             return Some(ConnectionRoute {
                 group_index: idx,
                 attempted_mask,
@@ -162,24 +330,40 @@ pub fn select_next_group(
     None
 }
 
-pub fn supports_trigger(config: &RuntimeConfig, trigger: u32) -> bool {
-    config.groups
-        .iter()
-        .any(|group| group.detect != 0 && (group.detect & trigger) != 0)
-}
-
 pub fn extract_host(payload: &[u8]) -> Option<String> {
     parse_http(payload)
         .map(|host| String::from_utf8_lossy(host.host).into_owned())
         .or_else(|| parse_tls(payload).map(|host| String::from_utf8_lossy(host).into_owned()))
 }
 
-fn group_matches(group: &DesyncGroup, dest: SocketAddr, payload: Option<&[u8]>) -> bool {
+pub fn group_requires_payload(group: &DesyncGroup) -> bool {
+    !group.filters.hosts.is_empty() || group.proto != 0
+}
+
+pub fn route_matches_payload(
+    config: &RuntimeConfig,
+    group_index: usize,
+    dest: SocketAddr,
+    payload: &[u8],
+) -> bool {
+    config
+        .groups
+        .get(group_index)
+        .is_some_and(|group| group_matches(group, dest, Some(payload), false))
+}
+
+fn group_matches(
+    group: &DesyncGroup,
+    dest: SocketAddr,
+    payload: Option<&[u8]>,
+    allow_unknown_payload: bool,
+) -> bool {
     if !matches_l34(group, dest) {
         return false;
     }
     match payload {
         Some(payload) => matches_payload(group, payload),
+        None if allow_unknown_payload => true,
         None => group.filters.hosts.is_empty() && payload_proto_known(group),
     }
 }

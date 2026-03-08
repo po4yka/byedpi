@@ -3,15 +3,16 @@ use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
     UdpSocket,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use crate::platform;
+use crate::process;
 use crate::runtime_policy::{
-    extract_host, select_initial_group, select_next_group, supports_trigger, ConnectionRoute,
-    RuntimeCache,
+    extract_host, group_requires_payload, route_matches_payload, select_initial_group,
+    select_next_group, ConnectionRoute, RuntimeCache,
 };
 use ciadpi_config::{
     DesyncGroup, DesyncMode, RuntimeConfig, DETECT_CONNECT, DETECT_HTTP_LOCAT, DETECT_TLS_ERR,
@@ -37,6 +38,7 @@ const DESYNC_SEED_BASE: u32 = 7;
 struct RuntimeState {
     config: Arc<RuntimeConfig>,
     cache: Arc<Mutex<RuntimeCache>>,
+    active_clients: Arc<AtomicUsize>,
 }
 
 pub fn run_proxy(config: RuntimeConfig) -> io::Result<()> {
@@ -48,6 +50,11 @@ pub fn run_proxy(config: RuntimeConfig) -> io::Result<()> {
     let state = RuntimeState {
         config: Arc::new(config),
         cache: Arc::new(Mutex::new(cache)),
+        active_clients: Arc::new(AtomicUsize::new(0)),
+    };
+    let _cleanup = RuntimeCleanup {
+        config: state.config.clone(),
+        cache: state.cache.clone(),
     };
     let mut listener = build_listener(&state.config)?;
     let mut poll = Poll::new()?;
@@ -56,7 +63,10 @@ pub fn run_proxy(config: RuntimeConfig) -> io::Result<()> {
     let mut events = Events::with_capacity(32);
 
     loop {
-        poll.poll(&mut events, None)?;
+        if process::shutdown_requested() {
+            break Ok(());
+        }
+        poll.poll(&mut events, Some(Duration::from_millis(250)))?;
         for event in &events {
             if event.token() != LISTENER {
                 continue;
@@ -67,7 +77,12 @@ pub fn run_proxy(config: RuntimeConfig) -> io::Result<()> {
                         let state = state.clone();
                         let client = mio_to_std_stream(stream);
                         client.set_nonblocking(false)?;
+                        let Some(_slot) = ClientSlotGuard::acquire(state.active_clients.clone(), state.config.max_open as usize) else {
+                            drop(client);
+                            continue;
+                        };
                         thread::spawn(move || {
+                            let _slot = _slot;
                             if let Err(err) = handle_client(client, &state) {
                                 eprintln!("ciadpi-rs: client error: {err}");
                             }
@@ -78,6 +93,47 @@ pub fn run_proxy(config: RuntimeConfig) -> io::Result<()> {
                 }
             }
         }
+    }
+}
+
+struct RuntimeCleanup {
+    config: Arc<RuntimeConfig>,
+    cache: Arc<Mutex<RuntimeCache>>,
+}
+
+impl Drop for RuntimeCleanup {
+    fn drop(&mut self) {
+        let Ok(cache) = self.cache.lock() else {
+            return;
+        };
+        let _ = cache.dump_stdout_groups(&self.config, std::io::stdout());
+    }
+}
+
+struct ClientSlotGuard {
+    active: Arc<AtomicUsize>,
+}
+
+impl ClientSlotGuard {
+    fn acquire(active: Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        loop {
+            let current = active.load(Ordering::Relaxed);
+            if current >= limit {
+                return None;
+            }
+            if active
+                .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(Self { active });
+            }
+        }
+    }
+}
+
+impl Drop for ClientSlotGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -108,6 +164,9 @@ fn handle_client(mut client: TcpStream, state: &RuntimeState) -> io::Result<()> 
 
     let mut first = [0u8; 1];
     client.read_exact(&mut first)?;
+    if state.config.shadowsocks {
+        return handle_shadowsocks(client, state, first[0]);
+    }
     match first[0] {
         0x04 => handle_socks4(client, state, first[0]),
         0x05 => handle_socks5(client, state, first[0]),
@@ -128,8 +187,8 @@ fn handle_transparent(client: TcpStream, state: &RuntimeState) -> io::Result<()>
         ));
     }
 
-    match connect_target(target, state) {
-        Ok((upstream, route)) => relay(client, upstream, state, target, route),
+    match connect_target(target, state, None, false, None) {
+        Ok((upstream, route)) => relay(client, upstream, state, target, route, None),
         Err(err) => {
             if matches!(
                 err.kind(),
@@ -152,9 +211,26 @@ fn handle_socks4(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
     let parsed = parse_socks4_request(&request, session, &resolver);
     match parsed {
         Ok(ClientRequest::Socks4Connect(target)) => {
-            let (upstream, route) = connect_target(target.addr, state)?;
-            client.write_all(encode_socks4_reply(true).as_bytes())?;
-            relay(client, upstream, state, target.addr, route)
+            match maybe_delay_connect(&mut client, state, target.addr, HandshakeKind::Socks4)? {
+                DelayConnect::Immediate => {
+                    let (upstream, route) =
+                        connect_target(target.addr, state, None, false, None)?;
+                    client.write_all(encode_socks4_reply(true).as_bytes())?;
+                    relay(client, upstream, state, target.addr, route, None)
+                }
+                DelayConnect::Delayed { route, payload } => {
+                    let host = extract_host(&payload);
+                    let (upstream, route) = connect_target_with_route(
+                        target.addr,
+                        state,
+                        route,
+                        Some(&payload),
+                        host.clone(),
+                    )?;
+                    relay(client, upstream, state, target.addr, route, Some(payload))
+                }
+                DelayConnect::Closed => Ok(()),
+            }
         }
         Ok(_) => {
             client.write_all(encode_socks4_reply(false).as_bytes())?;
@@ -181,19 +257,35 @@ fn handle_socks5(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
 
     match parse_socks5_request(&request, SocketType::Stream, session, &resolver) {
         Ok(ClientRequest::Socks5Connect(target)) => {
-            match connect_target(target.addr, state) {
-                Ok((upstream, route)) => {
-                    let reply_addr = upstream
-                        .local_addr()
-                        .unwrap_or_else(|_| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
-                    client.write_all(encode_socks5_reply(0, reply_addr).as_bytes())?;
-                    relay(client, upstream, state, target.addr, route)
+            match maybe_delay_connect(&mut client, state, target.addr, HandshakeKind::Socks5)? {
+                DelayConnect::Immediate => match connect_target(target.addr, state, None, false, None) {
+                    Ok((upstream, route)) => {
+                        let reply_addr = upstream
+                            .local_addr()
+                            .unwrap_or_else(|_| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
+                        client.write_all(encode_socks5_reply(0, reply_addr).as_bytes())?;
+                        relay(client, upstream, state, target.addr, route, None)
+                    }
+                    Err(_) => {
+                        let fail = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+                        client.write_all(encode_socks5_reply(S_ER_CONN, fail).as_bytes())?;
+                        Ok(())
+                    }
+                },
+                DelayConnect::Delayed { route, payload } => {
+                    let host = extract_host(&payload);
+                    match connect_target_with_route(
+                        target.addr,
+                        state,
+                        route,
+                        Some(&payload),
+                        host.clone(),
+                    ) {
+                        Ok((upstream, route)) => relay(client, upstream, state, target.addr, route, Some(payload)),
+                        Err(_) => Ok(()),
+                    }
                 }
-                Err(_) => {
-                    let fail = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-                    client.write_all(encode_socks5_reply(S_ER_CONN, fail).as_bytes())?;
-                    Ok(())
-                }
+                DelayConnect::Closed => Ok(()),
             }
         }
         Ok(ClientRequest::Socks5UdpAssociate(_target)) => {
@@ -221,21 +313,60 @@ fn handle_http_connect(mut client: TcpStream, state: &RuntimeState) -> io::Resul
     let request = read_http_connect_request(&mut client)?;
     let resolver = |host: &str, socket_type: SocketType| resolve_name(host, socket_type, &state.config);
     match parse_http_connect_request(&request, &resolver) {
-        Ok(ClientRequest::HttpConnect(target)) => match connect_target(target.addr, state) {
-            Ok((upstream, route)) => {
-                client.write_all(encode_http_connect_reply(true).as_bytes())?;
-                relay(client, upstream, state, target.addr, route)
+        Ok(ClientRequest::HttpConnect(target)) => match maybe_delay_connect(&mut client, state, target.addr, HandshakeKind::HttpConnect)? {
+            DelayConnect::Immediate => match connect_target(target.addr, state, None, false, None) {
+                Ok((upstream, route)) => {
+                    client.write_all(encode_http_connect_reply(true).as_bytes())?;
+                    relay(client, upstream, state, target.addr, route, None)
+                }
+                Err(_) => {
+                    client.write_all(encode_http_connect_reply(false).as_bytes())?;
+                    Ok(())
+                }
+            },
+            DelayConnect::Delayed { route, payload } => {
+                let host = extract_host(&payload);
+                match connect_target_with_route(
+                    target.addr,
+                    state,
+                    route,
+                    Some(&payload),
+                    host.clone(),
+                ) {
+                    Ok((upstream, route)) => relay(client, upstream, state, target.addr, route, Some(payload)),
+                    Err(_) => Ok(()),
+                }
             }
-            Err(_) => {
-                client.write_all(encode_http_connect_reply(false).as_bytes())?;
-                Ok(())
-            }
+            DelayConnect::Closed => Ok(()),
         },
         _ => {
             client.write_all(encode_http_connect_reply(false).as_bytes())?;
             Ok(())
         }
     }
+}
+
+fn handle_shadowsocks(mut client: TcpStream, state: &RuntimeState, first_byte: u8) -> io::Result<()> {
+    let (target, first_request) = read_shadowsocks_request(&mut client, first_byte, &state.config)?;
+    let host = extract_host(&first_request);
+    let payload = if first_request.is_empty() {
+        None
+    } else {
+        Some(first_request.as_slice())
+    };
+    let (upstream, route) = connect_target(target, state, payload, false, host)?;
+    relay(
+        client,
+        upstream,
+        state,
+        target,
+        route,
+        if first_request.is_empty() {
+            None
+        } else {
+            Some(first_request)
+        },
+    )
 }
 
 fn handle_socks5_udp_associate(mut client: TcpStream, state: &RuntimeState) -> io::Result<()> {
@@ -390,37 +521,211 @@ fn resolve_name(host: &str, _socket_type: SocketType, config: &RuntimeConfig) ->
         .find(|addr| config.ipv6 || addr.is_ipv4())
 }
 
-fn connect_target(target: SocketAddr, state: &RuntimeState) -> io::Result<(TcpStream, ConnectionRoute)> {
-    let mut route = {
-        let mut cache = state
+#[derive(Clone, Copy)]
+enum HandshakeKind {
+    Socks4,
+    Socks5,
+    HttpConnect,
+}
+
+enum DelayConnect {
+    Immediate,
+    Delayed { route: ConnectionRoute, payload: Vec<u8> },
+    Closed,
+}
+
+fn maybe_delay_connect(
+    client: &mut TcpStream,
+    state: &RuntimeState,
+    target: SocketAddr,
+    handshake: HandshakeKind,
+) -> io::Result<DelayConnect> {
+    if !state.config.delay_conn {
+        return Ok(DelayConnect::Immediate);
+    }
+    let route = select_route(state, target, None, true)?;
+    let group = state
+        .config
+        .groups
+        .get(route.group_index)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing desync group"))?;
+    if !group_requires_payload(group) {
+        return Ok(DelayConnect::Immediate);
+    }
+
+    send_success_reply(client, handshake)?;
+    let Some(payload) = read_blocking_first_request(client, state.config.buffer_size)? else {
+        return Ok(DelayConnect::Closed);
+    };
+
+    let route = if route_matches_payload(&state.config, route.group_index, target, &payload) {
+        route
+    } else {
+        let cache = state
             .cache
             .lock()
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
-        select_initial_group(&state.config, &mut cache, target, None)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "no matching desync group"))?
+        select_next_group(&state.config, &cache, &route, target, Some(&payload), 0, true)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::PermissionDenied, "no matching desync group")
+            })?
     };
 
+    Ok(DelayConnect::Delayed { route, payload })
+}
+
+fn send_success_reply(client: &mut TcpStream, handshake: HandshakeKind) -> io::Result<()> {
+    match handshake {
+        HandshakeKind::Socks4 => client.write_all(encode_socks4_reply(true).as_bytes()),
+        HandshakeKind::Socks5 => {
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+            client.write_all(encode_socks5_reply(0, addr).as_bytes())
+        }
+        HandshakeKind::HttpConnect => client.write_all(encode_http_connect_reply(true).as_bytes()),
+    }
+}
+
+fn read_blocking_first_request(
+    client: &mut TcpStream,
+    buffer_size: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    let original_timeout = client.read_timeout()?;
+    client.set_read_timeout(None)?;
+    let mut buffer = vec![0u8; buffer_size.max(16_384)];
+    let result = match client.read(&mut buffer) {
+        Ok(0) => Ok(None),
+        Ok(n) => {
+            buffer.truncate(n);
+            Ok(Some(buffer))
+        }
+        Err(err) => Err(err),
+    };
+    client.set_read_timeout(original_timeout)?;
+    result
+}
+
+fn read_shadowsocks_request(
+    client: &mut TcpStream,
+    first_byte: u8,
+    config: &RuntimeConfig,
+) -> io::Result<(SocketAddr, Vec<u8>)> {
+    let mut request = vec![first_byte];
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some((target, header_len)) = parse_shadowsocks_target(&request, config) {
+            return Ok((target, request[header_len..].to_vec()));
+        }
+        let n = client.read(&mut chunk)?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected eof during shadowsocks request",
+            ));
+        }
+        request.extend_from_slice(&chunk[..n]);
+        if request.len() > 64 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "shadowsocks request too large",
+            ));
+        }
+    }
+}
+
+fn parse_shadowsocks_target(packet: &[u8], config: &RuntimeConfig) -> Option<(SocketAddr, usize)> {
+    let atyp = *packet.first()?;
+    match atyp {
+        S_ATP_I4 => {
+            if packet.len() < 7 {
+                return None;
+            }
+            let ip = Ipv4Addr::new(packet[1], packet[2], packet[3], packet[4]);
+            let port = u16::from_be_bytes([packet[5], packet[6]]);
+            Some((SocketAddr::new(IpAddr::V4(ip), port), 7))
+        }
+        S_ATP_I6 => {
+            if packet.len() < 19 || !config.ipv6 {
+                return None;
+            }
+            let mut raw = [0u8; 16];
+            raw.copy_from_slice(&packet[1..17]);
+            let port = u16::from_be_bytes([packet[17], packet[18]]);
+            Some((SocketAddr::new(IpAddr::V6(Ipv6Addr::from(raw)), port), 19))
+        }
+        0x03 => {
+            let len = *packet.get(1)? as usize;
+            if packet.len() < 2 + len + 2 || !config.resolve {
+                return None;
+            }
+            let host = std::str::from_utf8(&packet[2..2 + len]).ok()?;
+            let port = u16::from_be_bytes([packet[2 + len], packet[3 + len]]);
+            let resolved = resolve_name(host, SocketType::Stream, config)?;
+            Some((SocketAddr::new(resolved.ip(), port), 2 + len + 2))
+        }
+        _ => None,
+    }
+}
+
+fn select_route(
+    state: &RuntimeState,
+    target: SocketAddr,
+    payload: Option<&[u8]>,
+    allow_unknown_payload: bool,
+) -> io::Result<ConnectionRoute> {
+    let mut cache = state
+        .cache
+        .lock()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+    select_initial_group(
+        &state.config,
+        &mut cache,
+        target,
+        payload,
+        allow_unknown_payload,
+    )
+    .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "no matching desync group"))
+}
+
+fn connect_target(
+    target: SocketAddr,
+    state: &RuntimeState,
+    payload: Option<&[u8]>,
+    allow_unknown_payload: bool,
+    host: Option<String>,
+) -> io::Result<(TcpStream, ConnectionRoute)> {
+    let route = select_route(state, target, payload, allow_unknown_payload)?;
+    connect_target_with_route(target, state, route, payload, host)
+}
+
+fn connect_target_with_route(
+    target: SocketAddr,
+    state: &RuntimeState,
+    mut route: ConnectionRoute,
+    payload: Option<&[u8]>,
+    host: Option<String>,
+) -> io::Result<(TcpStream, ConnectionRoute)> {
     loop {
         match connect_target_via_group(target, state, route.group_index) {
             Ok(stream) => return Ok((stream, route)),
             Err(err) => {
-                let Some(next) = select_next_group(
-                    &state.config,
-                    &route,
-                    target,
-                    None,
-                    DETECT_CONNECT,
-                    true,
-                ) else {
-                    return Err(err);
-                };
-                {
+                let next = {
                     let mut cache = state
                         .cache
                         .lock()
                         .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
-                    cache.store(&state.config, target, next.group_index, None)?;
-                }
+                    cache.advance_route(
+                        &state.config,
+                        &route,
+                        target,
+                        payload,
+                        DETECT_CONNECT,
+                        true,
+                        host.clone(),
+                    )?
+                };
+                let Some(next) = next else {
+                    return Err(err);
+                };
                 route = next;
             }
         }
@@ -443,12 +748,14 @@ fn connect_target_via_group(
             upstream.addr,
             state.config.listen.bind_ip,
             state.config.protect_path.as_deref(),
+            state.config.tfo,
         )
     } else {
         connect_socket(
             target,
             state.config.listen.bind_ip,
             state.config.protect_path.as_deref(),
+            state.config.tfo,
         )
     }?;
 
@@ -463,8 +770,9 @@ fn connect_via_socks(
     upstream: SocketAddr,
     bind_ip: IpAddr,
     protect_path: Option<&str>,
+    tfo: bool,
 ) -> io::Result<TcpStream> {
-    let mut stream = connect_socket(upstream, bind_ip, protect_path)?;
+    let mut stream = connect_socket(upstream, bind_ip, protect_path, tfo)?;
     stream.write_all(&[S_VER5, 1, S_AUTH_NONE])?;
     let mut auth = [0u8; 2];
     stream.read_exact(&mut auth)?;
@@ -683,6 +991,7 @@ fn connect_socket(
     target: SocketAddr,
     bind_ip: IpAddr,
     protect_path: Option<&str>,
+    tfo: bool,
 ) -> io::Result<TcpStream> {
     let domain = match target {
         SocketAddr::V4(_) => Domain::IPV4,
@@ -691,6 +1000,9 @@ fn connect_socket(
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     if let Some(path) = protect_path {
         platform::protect_socket(&socket, path)?;
+    }
+    if tfo {
+        platform::enable_tcp_fastopen_connect(&socket)?;
     }
     bind_socket(&socket, bind_ip, target)?;
     socket.connect(&SockAddr::from(target))?;
@@ -729,12 +1041,18 @@ fn relay(
     state: &RuntimeState,
     target: SocketAddr,
     mut route: ConnectionRoute,
+    seed_request: Option<Vec<u8>>,
 ) -> io::Result<()> {
     let mut session_state = SessionState::default();
 
-    if needs_first_exchange(&state.config) {
+    if seed_request.is_some() || needs_first_exchange(state)? {
         let request_timeout = client.read_timeout()?;
-        if let Some(first_request) = read_optional_first_request(&mut client, request_timeout)? {
+        let first_request = if let Some(seed) = seed_request {
+            Some(seed)
+        } else {
+            read_optional_first_request(&mut client, request_timeout)?
+        };
+        if let Some(first_request) = first_request {
             let original_request = first_request;
             let host = extract_host(&original_request);
 
@@ -745,28 +1063,36 @@ fn relay(
                 if let Err(err) =
                     send_with_group(&mut upstream, &state.config, &group, &original_request, 1)
                 {
-                    if !supports_trigger(&state.config, DETECT_TORST) {
+                    if !runtime_supports_trigger(state, DETECT_TORST)? {
                         return Err(err);
                     }
-                    let Some(next) = select_next_group(
-                        &state.config,
-                        &route,
-                        target,
-                        Some(&original_request),
-                        DETECT_TORST,
-                        true,
-                    ) else {
-                        return Err(err);
-                    };
-                    {
+                    let next = {
                         let mut cache = state
                             .cache
                             .lock()
                             .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
-                        cache.store(&state.config, target, next.group_index, host.clone())?;
-                    }
+                        cache.advance_route(
+                            &state.config,
+                            &route,
+                            target,
+                            Some(&original_request),
+                            DETECT_TORST,
+                            true,
+                            host.clone(),
+                        )?
+                    };
+                    let Some(next) = next else {
+                        return Err(err);
+                    };
                     route = next;
-                    upstream = reconnect_target(target, state, route.clone(), host.clone())?.0;
+                    upstream = reconnect_target(
+                        target,
+                        state,
+                        route.clone(),
+                        host.clone(),
+                        Some(&original_request),
+                    )?
+                    .0;
                     continue;
                 }
 
@@ -774,7 +1100,7 @@ fn relay(
                     &mut upstream,
                     &state.config,
                     &original_request,
-                    supports_trigger(&state.config, DETECT_TORST),
+                    runtime_supports_trigger(state, DETECT_TORST)?,
                 )? {
                     FirstResponse::Forward(bytes) => {
                         session_state.observe_inbound(&bytes);
@@ -783,28 +1109,36 @@ fn relay(
                     }
                     FirstResponse::NoData => break,
                     FirstResponse::Trigger(trigger) => {
-                        let Some(next) = select_next_group(
-                            &state.config,
-                            &route,
-                            target,
-                            Some(&original_request),
-                            trigger_flag(trigger),
-                            true,
-                        ) else {
+                        let next = {
+                            let mut cache = state
+                                .cache
+                                .lock()
+                                .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+                            cache.advance_route(
+                                &state.config,
+                                &route,
+                                target,
+                                Some(&original_request),
+                                trigger_flag(trigger),
+                                true,
+                                host.clone(),
+                            )?
+                        };
+                        let Some(next) = next else {
                             return Err(io::Error::new(
                                 io::ErrorKind::ConnectionReset,
                                 "auto trigger exhausted all candidate groups",
                             ));
                         };
-                        {
-                            let mut cache = state
-                                .cache
-                                .lock()
-                                .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
-                            cache.store(&state.config, target, next.group_index, host.clone())?;
-                        }
                         route = next;
-                        upstream = reconnect_target(target, state, route.clone(), host.clone())?.0;
+                        upstream = reconnect_target(
+                            target,
+                            state,
+                            route.clone(),
+                            host.clone(),
+                            Some(&original_request),
+                        )?
+                        .0;
                     }
                 }
             }
@@ -869,10 +1203,10 @@ fn relay_streams(
     Ok(())
 }
 
-fn needs_first_exchange(config: &RuntimeConfig) -> bool {
-    supports_trigger(config, DETECT_HTTP_LOCAT)
-        || supports_trigger(config, DETECT_TLS_ERR)
-        || supports_trigger(config, DETECT_TORST)
+fn needs_first_exchange(state: &RuntimeState) -> io::Result<bool> {
+    Ok(runtime_supports_trigger(state, DETECT_HTTP_LOCAT)?
+        || runtime_supports_trigger(state, DETECT_TLS_ERR)?
+        || runtime_supports_trigger(state, DETECT_TORST)?)
 }
 
 fn read_optional_first_request(
@@ -961,7 +1295,11 @@ fn first_response_timeout(config: &RuntimeConfig, request: &[u8]) -> Option<Dura
         Some(Duration::from_millis(config.partial_timeout_ms as u64))
     } else if config.timeout_ms != 0 {
         Some(Duration::from_millis(config.timeout_ms as u64))
-    } else if needs_first_exchange(config) {
+    } else if config
+        .groups
+        .iter()
+        .any(|group| group.detect & (DETECT_HTTP_LOCAT | DETECT_TLS_ERR | DETECT_TORST) != 0)
+    {
         Some(Duration::from_millis(250))
     } else {
         None
@@ -973,32 +1311,42 @@ fn reconnect_target(
     state: &RuntimeState,
     mut route: ConnectionRoute,
     host: Option<String>,
+    payload: Option<&[u8]>,
 ) -> io::Result<(TcpStream, ConnectionRoute)> {
     loop {
         match connect_target_via_group(target, state, route.group_index) {
             Ok(stream) => return Ok((stream, route)),
             Err(err) => {
-                let Some(next) = select_next_group(
-                    &state.config,
-                    &route,
-                    target,
-                    None,
-                    DETECT_CONNECT,
-                    true,
-                ) else {
-                    return Err(err);
-                };
-                {
+                let next = {
                     let mut cache = state
                         .cache
                         .lock()
                         .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
-                    cache.store(&state.config, target, next.group_index, host.clone())?;
-                }
+                    cache.advance_route(
+                        &state.config,
+                        &route,
+                        target,
+                        payload,
+                        DETECT_CONNECT,
+                        true,
+                        host.clone(),
+                    )?
+                };
+                let Some(next) = next else {
+                    return Err(err);
+                };
                 route = next;
             }
         }
     }
+}
+
+fn runtime_supports_trigger(state: &RuntimeState, trigger: u32) -> io::Result<bool> {
+    let cache = state
+        .cache
+        .lock()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+    Ok(cache.supports_trigger(trigger))
 }
 
 fn trigger_flag(trigger: TriggerEvent) -> u32 {

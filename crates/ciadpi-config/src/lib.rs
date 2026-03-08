@@ -656,6 +656,10 @@ pub fn parse_cli(args: &[String], startup: &StartupEnv) -> Result<ParseResult, C
             "-G" | "--http-connect" => config.http_connect = true,
             "-E" | "--transparent" => config.transparent = true,
             "-D" | "--daemon" => config.daemonize = true,
+            "-w" | "--pidfile" => {
+                let value = next_value(&effective_args, &mut idx, arg)?;
+                config.pid_file = Some(value.to_owned());
+            }
             "-F" | "--tfo" => config.tfo = true,
             "-S" | "--md5sig" => group!().md5sig = true,
             "-Y" | "--drop-sack" => group!().drop_sack = true,

@@ -2,6 +2,13 @@ use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
 
+pub fn enable_tcp_fastopen_connect() -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "tcp fast open connect is linux-only",
+    ))
+}
+
 pub fn set_tcp_md5sig(_stream: &TcpStream, _key_len: u16) -> io::Result<()> {
     Ok(())
 }

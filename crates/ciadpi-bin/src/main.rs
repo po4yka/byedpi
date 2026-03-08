@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use ciadpi_config::{parse_cli, ConfigError, ParseOutcome, StartupEnv, VERSION};
 
 mod platform;
+mod process;
 mod runtime;
 mod runtime_policy;
 
@@ -153,7 +154,15 @@ fn run() -> i32 {
             if env::var_os("CIADPI_RS_DRY_RUN").is_some() {
                 return 0;
             }
-            match runtime::run_proxy(parsed.config.expect("runtime config")) {
+            let config = parsed.config.expect("runtime config");
+            let _process = match process::ProcessGuard::prepare(&config) {
+                Ok(guard) => guard,
+                Err(err) => {
+                    eprintln!("ciadpi-rs: {err}");
+                    return 1;
+                }
+            };
+            match runtime::run_proxy(config) {
                 Ok(()) => 0,
                 Err(err) => {
                     eprintln!("ciadpi-rs: {err}");
