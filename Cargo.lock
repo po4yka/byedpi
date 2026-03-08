@@ -49,6 +49,7 @@ dependencies = [
  "ciadpi-desync",
  "ciadpi-packets",
  "ciadpi-session",
+ "libc",
  "mio",
  "socket2",
 ]

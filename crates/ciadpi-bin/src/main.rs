@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use ciadpi_config::{parse_cli, ConfigError, ParseOutcome, StartupEnv, VERSION};
 
+mod platform;
 mod runtime;
 
 fn help_text() -> String {

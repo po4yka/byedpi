@@ -298,6 +298,9 @@ pub fn plan_tcp(group: &DesyncGroup, input: &[u8], seed: u32, default_ttl: u8) -
                     actions.push(DesyncAction::SetMd5Sig { key_len: 5 });
                 }
                 actions.push(DesyncAction::Write(fake.bytes[fake.fake_offset..fake_end].to_vec()));
+                if group.md5sig {
+                    actions.push(DesyncAction::SetMd5Sig { key_len: 0 });
+                }
                 actions.push(DesyncAction::RestoreDefaultTtl);
                 if default_ttl != 0 {
                     actions.push(DesyncAction::SetTtl(default_ttl));

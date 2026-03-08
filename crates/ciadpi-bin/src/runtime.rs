@@ -4,24 +4,26 @@ use std::net::{
     UdpSocket,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::platform;
 use ciadpi_config::{DesyncGroup, RuntimeConfig};
-use ciadpi_desync::{plan_udp, DesyncAction};
+use ciadpi_desync::{plan_tcp, plan_udp, DesyncAction};
 use ciadpi_session::{
     encode_http_connect_reply, encode_socks4_reply, encode_socks5_reply,
     parse_http_connect_request, parse_socks4_request, parse_socks5_request, ClientRequest,
-    SessionConfig, SessionError, SocketType, S_ATP_I4, S_ATP_I6, S_AUTH_BAD, S_AUTH_NONE,
-    S_CMD_CONN, S_ER_CMD, S_ER_CONN, S_ER_GEN, S_VER5,
+    SessionConfig, SessionError, SessionState, SocketType, S_ATP_I4, S_ATP_I6, S_AUTH_BAD,
+    S_AUTH_NONE, S_CMD_CONN, S_ER_CMD, S_ER_CONN, S_ER_GEN, S_VER5,
 };
 use mio::net::TcpListener as MioTcpListener;
 use mio::{Events, Interest, Poll, Token};
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use socket2::{Domain, Protocol, SockAddr, SockRef, Socket, Type};
 
 const LISTENER: Token = Token(0);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const DESYNC_SEED_BASE: u32 = 7;
 
 #[derive(Clone)]
 struct RuntimeState {
@@ -30,6 +32,10 @@ struct RuntimeState {
 }
 
 pub fn run_proxy(config: RuntimeConfig) -> io::Result<()> {
+    let mut config = config;
+    if config.default_ttl == 0 {
+        config.default_ttl = platform::detect_default_ttl()?;
+    }
     let group = config.groups[config.actionable_group()].clone();
     let state = RuntimeState {
         config: Arc::new(config),
@@ -113,7 +119,7 @@ fn handle_socks4(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
         Ok(ClientRequest::Socks4Connect(target)) => {
             let mut upstream = connect_target(target.addr, state)?;
             client.write_all(encode_socks4_reply(true).as_bytes())?;
-            relay(client, &mut upstream)
+            relay(client, &mut upstream, state)
         }
         Ok(_) => {
             client.write_all(encode_socks4_reply(false).as_bytes())?;
@@ -146,7 +152,7 @@ fn handle_socks5(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
                         .local_addr()
                         .unwrap_or_else(|_| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
                     client.write_all(encode_socks5_reply(0, reply_addr).as_bytes())?;
-                    relay(client, &mut upstream)
+                    relay(client, &mut upstream, state)
                 }
                 Err(_) => {
                     let fail = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
@@ -183,7 +189,7 @@ fn handle_http_connect(mut client: TcpStream, state: &RuntimeState) -> io::Resul
         Ok(ClientRequest::HttpConnect(target)) => match connect_target(target.addr, state) {
             Ok(mut upstream) => {
                 client.write_all(encode_http_connect_reply(true).as_bytes())?;
-                relay(client, &mut upstream)
+                relay(client, &mut upstream, state)
             }
             Err(_) => {
                 client.write_all(encode_http_connect_reply(false).as_bytes())?;
@@ -607,7 +613,7 @@ fn is_unspecified(ip: IpAddr) -> bool {
     }
 }
 
-fn relay(client: TcpStream, upstream: &mut TcpStream) -> io::Result<()> {
+fn relay(client: TcpStream, upstream: &mut TcpStream, state: &RuntimeState) -> io::Result<()> {
     client.set_read_timeout(None)?;
     client.set_write_timeout(None)?;
     upstream.set_read_timeout(None)?;
@@ -617,9 +623,22 @@ fn relay(client: TcpStream, upstream: &mut TcpStream) -> io::Result<()> {
     let client_writer = client.try_clone()?;
     let upstream_reader = upstream.try_clone()?;
     let upstream_writer = upstream.try_clone()?;
+    let session_state = Arc::new(Mutex::new(SessionState::default()));
+    let outbound_session = session_state.clone();
+    let inbound_session = session_state.clone();
+    let config = state.config.clone();
+    let group = state.group.clone();
 
-    let down = thread::spawn(move || copy_half(upstream_reader, client_writer));
-    let up = thread::spawn(move || copy_half(client_reader, upstream_writer));
+    let down = thread::spawn(move || copy_inbound_half(upstream_reader, client_writer, inbound_session));
+    let up = thread::spawn(move || {
+        copy_outbound_half(
+            client_reader,
+            upstream_writer,
+            config,
+            group,
+            outbound_session,
+        )
+    });
 
     let up_result = up
         .join()
@@ -633,11 +652,124 @@ fn relay(client: TcpStream, upstream: &mut TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-fn copy_half(mut reader: TcpStream, mut writer: TcpStream) -> io::Result<()> {
-    let result = io::copy(&mut reader, &mut writer).map(|_| ());
+fn copy_inbound_half(
+    mut reader: TcpStream,
+    mut writer: TcpStream,
+    session: Arc<Mutex<SessionState>>,
+) -> io::Result<()> {
+    let mut buffer = [0u8; 16_384];
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        if let Ok(mut state) = session.lock() {
+            state.observe_inbound(&buffer[..n]);
+        }
+        writer.write_all(&buffer[..n])?;
+    }
     let _ = writer.shutdown(Shutdown::Write);
     let _ = reader.shutdown(Shutdown::Read);
-    result
+    Ok(())
+}
+
+fn copy_outbound_half(
+    mut reader: TcpStream,
+    mut writer: TcpStream,
+    config: Arc<RuntimeConfig>,
+    group: DesyncGroup,
+    session: Arc<Mutex<SessionState>>,
+) -> io::Result<()> {
+    let mut buffer = [0u8; 16_384];
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        let payload = &buffer[..n];
+        let round = {
+            let mut state = session
+                .lock()
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "session mutex poisoned"))?;
+            state.observe_outbound(payload);
+            state.round_count as i32
+        };
+
+        if should_desync_tcp(&group, round) {
+            let seed = DESYNC_SEED_BASE + (round.saturating_sub(1) as u32);
+            match plan_tcp(&group, payload, seed, config.default_ttl) {
+                Ok(plan) => execute_tcp_actions(&mut writer, &plan.actions, config.default_ttl)?,
+                Err(_) => writer.write_all(payload)?,
+            }
+        } else {
+            writer.write_all(payload)?;
+        }
+    }
+    let _ = writer.shutdown(Shutdown::Write);
+    let _ = reader.shutdown(Shutdown::Read);
+    Ok(())
+}
+
+fn should_desync_tcp(group: &DesyncGroup, round: i32) -> bool {
+    has_tcp_actions(group) && check_round(group.rounds, round)
+}
+
+fn has_tcp_actions(group: &DesyncGroup) -> bool {
+    !group.parts.is_empty() || group.mod_http != 0 || !group.tls_records.is_empty() || group.tlsminor.is_some()
+}
+
+fn check_round(rounds: [i32; 2], round: i32) -> bool {
+    (rounds[1] == 0 && round <= 1) || (round >= rounds[0] && round <= rounds[1])
+}
+
+fn execute_tcp_actions(
+    writer: &mut TcpStream,
+    actions: &[DesyncAction],
+    default_ttl: u8,
+) -> io::Result<()> {
+    for action in actions {
+        match action {
+            DesyncAction::Write(bytes) => writer.write_all(bytes)?,
+            DesyncAction::WriteUrgent { prefix, urgent_byte } => {
+                send_out_of_band(writer, prefix, *urgent_byte)?
+            }
+            DesyncAction::SetTtl(ttl) => set_stream_ttl(writer, *ttl)?,
+            DesyncAction::RestoreDefaultTtl => {
+                if default_ttl != 0 {
+                    set_stream_ttl(writer, default_ttl)?;
+                }
+            }
+            DesyncAction::SetMd5Sig { key_len } => platform::set_tcp_md5sig(writer, *key_len)?,
+            DesyncAction::AttachDropSack => {}
+            DesyncAction::DetachDropSack => {}
+            DesyncAction::AwaitWritable => {}
+        }
+    }
+    Ok(())
+}
+
+fn send_out_of_band(writer: &TcpStream, prefix: &[u8], urgent_byte: u8) -> io::Result<()> {
+    let mut packet = Vec::with_capacity(prefix.len() + 1);
+    packet.extend_from_slice(prefix);
+    packet.push(urgent_byte);
+    let sent = SockRef::from(writer).send_out_of_band(&packet)?;
+    if sent != packet.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "partial MSG_OOB send",
+        ));
+    }
+    Ok(())
+}
+
+fn set_stream_ttl(stream: &TcpStream, ttl: u8) -> io::Result<()> {
+    let socket = SockRef::from(stream);
+    let ipv4 = socket.set_ttl(ttl as u32);
+    let ipv6 = socket.set_unicast_hops_v6(ttl as u32);
+    match (ipv4, ipv6) {
+        (Ok(()), _) | (_, Ok(())) => Ok(()),
+        (Err(err), _) => Err(err),
+    }
 }
 
 #[cfg(unix)]
