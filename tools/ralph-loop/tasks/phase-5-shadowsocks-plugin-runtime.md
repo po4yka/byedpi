@@ -1,3 +1,8 @@
+Status
+
+Completed in `b6dd43d` (`Complete Rust runtime migration slice`).
+Retained as historical Ralph task context; no longer part of the active manifest.
+
 Goal
 
 Finish Shadowsocks plugin runtime mode in the Rust binary so env-based startup is not just parsed but works end to end with parity coverage.

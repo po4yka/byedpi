@@ -1,3 +1,8 @@
+Status
+
+Completed in `b6dd43d` (`Complete Rust runtime migration slice`).
+Retained as historical Ralph task context; no longer part of the active manifest.
+
 Goal
 
 Port the remaining upstream-connect gating behavior from C into Rust, including delayed connect decisions and stdout cache dumping.

@@ -1,3 +1,8 @@
+Status
+
+Completed in `11bcff1` (`Add Rust auto parity and routed desync tests`).
+Retained as historical Ralph task context; no longer part of the active manifest.
+
 Goal
 
 Port the remaining adaptive runtime policy behavior from the C implementation into Rust so `ciadpi-rs` matches the Linux oracle for cache promotion, priority ordering, and auto-trigger policy decisions.

@@ -1,3 +1,8 @@
+Status
+
+Completed in `b6dd43d` (`Complete Rust runtime migration slice`).
+Retained as historical Ralph task context; no longer part of the active manifest.
+
 Goal
 
 Implement the remaining Rust runtime process-management and socket bootstrap features that are already exposed by the CLI: daemon mode, pidfile handling, and TCP Fast Open.

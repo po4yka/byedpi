@@ -1,3 +1,8 @@
+Status
+
+Completed in `b6dd43d` (`Complete Rust runtime migration slice`).
+Retained as historical Ralph task context; no longer part of the active manifest.
+
 Goal
 
 Replace the remaining ad hoc runtime model in Rust with behavior that matches the C connection lifecycle and limit handling more closely, especially around `max_open` and connection churn.

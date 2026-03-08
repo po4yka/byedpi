@@ -1,3 +1,8 @@
+Status
+
+Completed across `6ebce53` (`Port Rust timeout runtime parity`) and `5e30192` (`Port Rust staged send parity`).
+Retained as historical Ralph task context; no longer part of the active manifest.
+
 Goal
 
 Match the remaining C send staging and timeout behavior in Rust so desync execution and long-lived sessions behave the same under partial writes, retries, and timeout-driven triggers.

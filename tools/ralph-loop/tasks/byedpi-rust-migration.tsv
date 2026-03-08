@@ -1,9 +1,4 @@
 # phase	id	slug	max_iterations	task_file	description
-1	runtime-policy-parity	runtime-policy-parity	60	tools/ralph-loop/tasks/phase-1-runtime-policy-parity.md	Port the remaining AUTO/cache policy behavior from C into Rust runtime policy code.
-1	daemon-pidfile-tfo	daemon-pidfile-tfo	40	tools/ralph-loop/tasks/phase-1-daemon-pidfile-tfo.md	Implement daemon mode, pidfile handling, and TCP Fast Open in the Rust runtime.
-2	connect-gating-and-cache-stdout	connect-gating-and-cache-stdout	60	tools/ralph-loop/tasks/phase-2-connect-gating-and-cache-stdout.md	Port delayed upstream connect, cache-file stdout dumping, and related request gating semantics.
-3	staged-send-and-timeout-parity	staged-send-and-timeout-parity	70	tools/ralph-loop/tasks/phase-3-staged-send-and-timeout-parity.md	Match the remaining C timeout and staged send behavior in Rust desync execution.
-4	connection-limits-and-runtime-shape	connection-limits-and-runtime-shape	70	tools/ralph-loop/tasks/phase-4-connection-limits-and-runtime-shape.md	Replace the ad hoc thread-per-client model with runtime behavior that matches C connection limits and lifecycle handling.
-5	shadowsocks-plugin-runtime	shadowsocks-plugin-runtime	50	tools/ralph-loop/tasks/phase-5-shadowsocks-plugin-runtime.md	Finish Shadowsocks plugin runtime mode in the Rust binary with parity coverage.
+# phases 1-5 are complete and retained as archived task specs under tools/ralph-loop/tasks/
 6	linux-cutover-and-oracle-retention	linux-cutover-and-oracle-retention	60	tools/ralph-loop/tasks/phase-6-linux-cutover-and-oracle-retention.md	Cut Linux over to the Rust binary, keep C as hidden oracle infrastructure, and tighten CI/release gates.
 7	windows-runtime-port	windows-runtime-port	90	tools/ralph-loop/tasks/phase-7-windows-runtime-port.md	Port the deferred Windows runtime and service layer after Linux cutover is green.
