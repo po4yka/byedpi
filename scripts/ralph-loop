@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+CONFIG_PATH="tools/ralph-loop/config/ralph.core.yml"
+TEMPLATE_DIR="tools/ralph-loop/templates"
+RUNS_ROOT=".ralph-loop/runs"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  scripts/ralph-loop start --backend {claude|codex} (--task "<text>" | --task-file <path>) [--slug <name>] [--max-iterations <n>] [--workflow builtin:feature] [--dry-run] [--no-auto-merge]
+  scripts/ralph-loop status
+  scripts/ralph-loop logs <loop-id> [--follow]
+  scripts/ralph-loop diff <loop-id> [--stat]
+  scripts/ralph-loop attach <loop-id>
+
+Commands:
+  start   Prepare run bundle and launch Ralph loop
+  status  Alias for `ralph loops list`
+  logs    Alias for `ralph loops logs`
+  diff    Alias for `ralph loops diff`
+  attach  Alias for `ralph loops attach`
+USAGE
+}
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+require_cmd() {
+  local cmd="$1"
+  command -v "$cmd" >/dev/null 2>&1 || fail "Required command not found in PATH: $cmd"
+}
+
+slugify() {
+  local value="$1"
+  local slug
+  slug="$(printf '%s' "$value" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr -cs 'a-z0-9' '-' \
+    | sed -e 's/^-*//' -e 's/-*$//' \
+    | cut -c1-40)"
+
+  if [[ -z "$slug" ]]; then
+    slug="task"
+  fi
+
+  printf '%s' "$slug"
+}
+
+random_suffix() {
+  printf '%06x' "$(( (RANDOM << 8 | RANDOM) & 0xFFFFFF ))"
+}
+
+render_template() {
+  local template="$1"
+  local output="$2"
+  local run_id="$3"
+  local backend="$4"
+  local workflow="$5"
+  local created_at="$6"
+  local task_file="$7"
+  local scratchpad_path="$8"
+  local specs_dir_path="$9"
+
+  sed \
+    -e "s|{{RUN_ID}}|$run_id|g" \
+    -e "s|{{BACKEND}}|$backend|g" \
+    -e "s|{{WORKFLOW}}|$workflow|g" \
+    -e "s|{{CREATED_AT}}|$created_at|g" \
+    -e "s|{{TASK_FILE}}|$task_file|g" \
+    -e "s|{{SCRATCHPAD_PATH}}|$scratchpad_path|g" \
+    -e "s|{{SPECS_DIR}}|$specs_dir_path|g" \
+    "$template" > "$output"
+}
+
+start_cmd() {
+  require_cmd ralph
+  cd "$REPO_ROOT"
+
+  local backend=""
+  local task_text=""
+  local task_file_input=""
+  local slug=""
+  local max_iterations=""
+  local workflow="builtin:feature"
+  local dry_run="0"
+  local no_auto_merge="0"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --backend)
+        [[ $# -ge 2 ]] || fail "--backend requires a value"
+        backend="$2"
+        shift 2
+        ;;
+      --task)
+        [[ $# -ge 2 ]] || fail "--task requires a value"
+        task_text="$2"
+        shift 2
+        ;;
+      --task-file)
+        [[ $# -ge 2 ]] || fail "--task-file requires a value"
+        task_file_input="$2"
+        shift 2
+        ;;
+      --slug)
+        [[ $# -ge 2 ]] || fail "--slug requires a value"
+        slug="$2"
+        shift 2
+        ;;
+      --max-iterations)
+        [[ $# -ge 2 ]] || fail "--max-iterations requires a value"
+        max_iterations="$2"
+        shift 2
+        ;;
+      --workflow)
+        [[ $# -ge 2 ]] || fail "--workflow requires a value"
+        workflow="$2"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run="1"
+        shift
+        ;;
+      --no-auto-merge)
+        no_auto_merge="1"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "Unknown start option: $1"
+        ;;
+    esac
+  done
+
+  case "$backend" in
+    claude|codex) ;;
+    *) fail "--backend must be either 'claude' or 'codex'" ;;
+  esac
+
+  if [[ -n "$task_text" && -n "$task_file_input" ]]; then
+    fail "Use either --task or --task-file, not both"
+  fi
+
+  if [[ -n "$task_file_input" ]]; then
+    [[ -f "$task_file_input" ]] || fail "Task file not found: $task_file_input"
+    task_text="$(cat "$task_file_input")"
+  fi
+
+  [[ -n "$task_text" ]] || fail "Either --task or --task-file is required"
+
+  if [[ -n "$max_iterations" ]] && ! [[ "$max_iterations" =~ ^[0-9]+$ ]]; then
+    fail "--max-iterations must be a positive integer"
+  fi
+
+  if [[ -z "$slug" ]]; then
+    if [[ -n "$task_file_input" ]]; then
+      slug="$(slugify "$(basename "$task_file_input" .md)")"
+    else
+      slug="$(slugify "$task_text")"
+    fi
+  else
+    slug="$(slugify "$slug")"
+  fi
+
+  local timestamp
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+
+  local run_id
+  run_id="${timestamp}-${backend}-${slug}-$(random_suffix)"
+
+  local run_dir
+  run_dir="$RUNS_ROOT/$run_id"
+
+  local scratchpad_path
+  scratchpad_path=".ralph/agent/$run_id/scratchpad.md"
+
+  local specs_dir_path
+  specs_dir_path=".ralph/specs/$run_id/"
+
+  local created_at
+  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  local task_file
+  task_file="$run_dir/task.md"
+
+  local prompt_file
+  prompt_file="$run_dir/prompt.md"
+
+  local meta_file
+  meta_file="$run_dir/meta.env"
+
+  local launch_file
+  launch_file="$run_dir/launch.txt"
+
+  local task_template
+  task_template="$TEMPLATE_DIR/task.md.tmpl"
+
+  local prompt_template
+  prompt_template="$TEMPLATE_DIR/prompt.md.tmpl"
+
+  [[ -f "$CONFIG_PATH" ]] || fail "Missing config: $CONFIG_PATH"
+  [[ -f "$task_template" ]] || fail "Missing task template: $task_template"
+  [[ -f "$prompt_template" ]] || fail "Missing prompt template: $prompt_template"
+
+  mkdir -p "$run_dir" \
+    "$(dirname "$scratchpad_path")" \
+    "$specs_dir_path"
+
+  if [[ ! -f "$scratchpad_path" ]]; then
+    cat > "$scratchpad_path" <<SCRATCHPAD
+# Scratchpad for $run_id
+
+- Created: $created_at
+- Backend: $backend
+- Workflow: $workflow
+- Task bundle: $task_file
+
+Append reasoning notes below. Keep tasks in \`ralph tools task\`, not here.
+SCRATCHPAD
+  fi
+
+  if [[ ! -f ".ralph/agent/decisions.md" ]]; then
+    cat > ".ralph/agent/decisions.md" <<'DECISIONS'
+# Decision Journal
+
+Use one entry per consequential decision.
+
+## Template
+
+- ID: DEC-001
+- Decision:
+- Chosen Option:
+- Confidence:
+- Alternatives Considered:
+- Reasoning:
+- Reversibility:
+- Timestamp:
+DECISIONS
+  fi
+
+  render_template "$task_template" "$task_file" "$run_id" "$backend" "$workflow" "$created_at" "$task_file" "$scratchpad_path" "$specs_dir_path"
+  {
+    printf '\n'
+    printf '%s\n' "$task_text"
+  } >> "$task_file"
+
+  render_template "$prompt_template" "$prompt_file" "$run_id" "$backend" "$workflow" "$created_at" "$task_file" "$scratchpad_path" "$specs_dir_path"
+
+  local prompt_text
+  prompt_text="$(cat "$prompt_file")"
+
+  local cmd
+  cmd=(
+    ralph run
+    -c "$CONFIG_PATH"
+    -c "core.scratchpad=$scratchpad_path"
+    -c "core.specs_dir=$specs_dir_path"
+    -H "$workflow"
+    -b "$backend"
+    -p "$prompt_text"
+  )
+
+  if [[ -n "$max_iterations" ]]; then
+    cmd+=(--max-iterations "$max_iterations")
+  fi
+
+  if [[ "$no_auto_merge" == "1" ]]; then
+    cmd+=(--no-auto-merge)
+  fi
+
+  if [[ "$dry_run" == "1" ]]; then
+    cmd+=(--dry-run)
+  fi
+
+  local launch_cmd
+  launch_cmd="$(printf '%q ' "${cmd[@]}")"
+  launch_cmd="${launch_cmd% }"
+  printf '%s\n' "$launch_cmd" > "$launch_file"
+
+  cat > "$meta_file" <<META
+RUN_ID=$run_id
+BACKEND=$backend
+WORKFLOW=$workflow
+TASK_SOURCE=${task_file_input:-inline}
+SCRATCHPAD=$scratchpad_path
+SPECS_DIR=$specs_dir_path
+CREATED_AT=$created_at
+META
+
+  echo "Prepared Ralph run bundle: $run_dir"
+  echo "Launch command:"
+  echo "  $launch_cmd"
+
+  (
+    cd "$REPO_ROOT"
+    "${cmd[@]}"
+  )
+}
+
+status_cmd() {
+  require_cmd ralph
+  (cd "$REPO_ROOT" && ralph loops list)
+}
+
+logs_cmd() {
+  require_cmd ralph
+  [[ $# -ge 1 ]] || fail "logs requires <loop-id>"
+  (cd "$REPO_ROOT" && ralph loops logs "$@")
+}
+
+diff_cmd() {
+  require_cmd ralph
+  [[ $# -ge 1 ]] || fail "diff requires <loop-id>"
+  (cd "$REPO_ROOT" && ralph loops diff "$@")
+}
+
+attach_cmd() {
+  require_cmd ralph
+  [[ $# -ge 1 ]] || fail "attach requires <loop-id>"
+  (cd "$REPO_ROOT" && ralph loops attach "$@")
+}
+
+main() {
+  [[ $# -gt 0 ]] || {
+    usage
+    exit 1
+  }
+
+  case "$1" in
+    start)
+      shift
+      start_cmd "$@"
+      ;;
+    status)
+      shift
+      status_cmd "$@"
+      ;;
+    logs)
+      shift
+      logs_cmd "$@"
+      ;;
+    diff)
+      shift
+      diff_cmd "$@"
+      ;;
+    attach)
+      shift
+      attach_cmd "$@"
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      fail "Unknown command: $1"
+      ;;
+  esac
+}
+
+main "$@"

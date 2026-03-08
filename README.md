@@ -26,6 +26,17 @@ make fuzz-packets
 - `make test-sanitize` reruns those tests with AddressSanitizer and UndefinedBehaviorSanitizer
 - `make fuzz-packets` runs a standalone mutation-based fuzz smoke test over the packet corpus
 
+### Ralph Loop Migration
+```
+scripts/ralph-rust-migration list
+scripts/ralph-rust-migration dry-run phase 1
+scripts/ralph-rust-migration start task runtime-policy-parity
+```
+
+- Repo-local Ralph loop infrastructure for the remaining C-to-Rust migration lives under `tools/ralph-loop/`
+- `scripts/ralph-rust-migration` defaults to the `codex` backend and manual merge mode for the remaining runtime migration tasks
+- Task specs, prompts, and launch details are documented in `tools/ralph-loop/README.md`
+
 ------
 ### Описание аргументов
 ```

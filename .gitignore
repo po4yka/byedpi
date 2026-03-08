@@ -8,3 +8,7 @@ tests/bin/
 tests/corpus/packets/.stamp
 tests/corpus/packets/*.bin
 target/
+.ralph/
+.agent/
+.ralph-loop/
+.worktrees/

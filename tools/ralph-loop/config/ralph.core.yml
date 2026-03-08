@@ -1,0 +1,34 @@
+event_loop:
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 80
+  max_runtime_seconds: 21600
+  idle_timeout_secs: 1800
+
+cli:
+  backend: "codex"
+  prompt_mode: "arg"
+
+core:
+  specs_dir: ".ralph/specs/"
+  guardrails:
+    - "Keep the current C implementation as the Linux behavior oracle unless the task explicitly changes the cutover rules."
+    - "Do not weaken or delete existing tests; extend the contract or differential tests before changing behavior."
+    - "Preserve the ciadpi CLI, env startup behavior, cache format, and network-visible semantics unless the task file explicitly allows a change."
+    - "Keep ciadpi-packets, ciadpi-config, ciadpi-session, and ciadpi-desync in safe Rust; limit unsafe to ciadpi-bin platform glue."
+    - "Run the verification steps listed in the task file before printing LOOP_COMPLETE."
+
+features:
+  parallel: true
+  auto_merge: true
+  preflight:
+    enabled: false
+    strict: false
+    skip: []
+
+memories:
+  enabled: true
+  inject: auto
+  budget: 2000
+
+tasks:
+  enabled: true
