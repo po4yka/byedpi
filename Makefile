@@ -113,10 +113,13 @@ rust-bin: Cargo.toml
 test-rust-binary-parity: $(TARGET) rust-bin
 	$(PYTHON) $(TEST_DIR)/test_rust_binary_parity.py --c-binary ./$(TARGET) --rust-binary ./$(RUST_BIN)
 
+test-rust-runtime: rust-bin
+	$(PYTHON) $(TEST_DIR)/test_rust_runtime_subset.py --binary ./$(RUST_BIN)
+
 bench-smoke: oracles packets-corpus Cargo.toml
 	$(CARGO) test -p ciadpi-packets benchmark_smoke -- --ignored --nocapture
 
-test: test-packets test-contract test-integration test-desync-runtime test-rust test-rust-binary-parity
+test: test-packets test-contract test-integration test-desync-runtime test-rust test-rust-binary-parity test-rust-runtime
 
 test-sanitize: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_SAN_BIN) $(SAN_TARGET) oracles
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PACKETS_TEST_SAN_BIN) $(PACKETS_CORPUS_DIR)
@@ -137,4 +140,4 @@ install: $(TARGET)
 	mkdir -p $(INSTALL_DIR)
 	install -m 755 $(TARGET) $(INSTALL_DIR)
 
-.PHONY: all windows clean install oracles packets-corpus rust-bin test-packets test-contract test-integration test-desync-runtime test-rust test-rust-binary-parity bench-smoke test test-sanitize fuzz-packets
+.PHONY: all windows clean install oracles packets-corpus rust-bin test-packets test-contract test-integration test-desync-runtime test-rust test-rust-binary-parity test-rust-runtime bench-smoke test test-sanitize fuzz-packets

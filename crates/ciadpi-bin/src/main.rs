@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use ciadpi_config::{parse_cli, ConfigError, ParseOutcome, StartupEnv, VERSION};
 
+mod runtime;
+
 fn help_text() -> String {
     let mut text = String::new();
     text.push_str("    -i, --ip, <ip>            Listening IP, default 0.0.0.0\n");
@@ -125,10 +127,6 @@ fn startup_env() -> StartupEnv {
     StartupEnv::from_env_and_cwd(&cwd)
 }
 
-fn runtime_stub_message() -> &'static str {
-    "ciadpi-rs parsed the config successfully, but the event loop and socket runtime are still running from the C implementation."
-}
-
 fn run() -> i32 {
     let args: Vec<String> = env::args().skip(1).collect();
     let startup = startup_env();
@@ -153,8 +151,13 @@ fn run() -> i32 {
             if env::var_os("CIADPI_RS_DRY_RUN").is_some() {
                 return 0;
             }
-            eprintln!("{}", runtime_stub_message());
-            1
+            match runtime::run_proxy(parsed.config.expect("runtime config")) {
+                Ok(()) => 0,
+                Err(err) => {
+                    eprintln!("ciadpi-rs: {err}");
+                    1
+                }
+            }
         }
     }
 }

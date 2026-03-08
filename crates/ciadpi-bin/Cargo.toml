@@ -9,6 +9,8 @@ ciadpi-config = { path = "../ciadpi-config" }
 ciadpi-desync = { path = "../ciadpi-desync" }
 ciadpi-packets = { path = "../ciadpi-packets" }
 ciadpi-session = { path = "../ciadpi-session" }
+mio = { version = "0.8", features = ["net", "os-poll"] }
+socket2 = "0.5"
 
 [[bin]]
 name = "ciadpi-rs"
