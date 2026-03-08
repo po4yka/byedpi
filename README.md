@@ -7,6 +7,17 @@ ciadpi --disorder 1 --auto=torst --tlsrec 1+s
 ciadpi --fake -1 --ttl 8
 ```
 
+### Testing
+```
+make test
+make test-sanitize
+make fuzz-packets
+```
+
+- `make test` runs corpus-backed `packets.c` regressions plus black-box SOCKS/HTTP CONNECT/TLS proxy tests
+- `make test-sanitize` reruns those tests with AddressSanitizer and UndefinedBehaviorSanitizer
+- `make fuzz-packets` runs a standalone mutation-based fuzz smoke test over the packet corpus
+
 ------
 ### Описание аргументов
 ```

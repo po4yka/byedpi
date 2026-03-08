@@ -311,7 +311,14 @@ int change_tls_sni(const char *host, char *buffer, ssize_t n, ssize_t nn)
         return -1;
     }
     if (diff) {
-        resize_sni(buffer, n, sni_offs, sni_sz, new_sz);
+        ssize_t curr_n = nn - avail - diff;
+        if (curr_n < 0 || curr_n > nn) {
+            return -1;
+        }
+        resize_sni(buffer, curr_n, sni_offs, sni_sz, new_sz);
+    }
+    if (sni_offs + 9 + new_sz > nn) {
+        return -1;
     }
     copy_name(buffer + sni_offs + 9, host, new_sz);
     
@@ -319,9 +326,14 @@ int change_tls_sni(const char *host, char *buffer, ssize_t n, ssize_t nn)
         avail -= resize_ech_ext(buffer, n, skip, avail);
     }
     if (avail >= 4) {
-        SHTONA(buffer, 5 + r_sz - avail, 0x0015);
-        SHTONA(buffer, 5 + r_sz - avail + 2, avail - 4);
-        memset(buffer + 5 + r_sz - avail + 4, 0, avail - 4);
+        ssize_t rec_end = 5 + r_sz;
+        ssize_t pad_offs = rec_end - avail;
+        if (rec_end > nn || pad_offs < 0 || pad_offs + avail > nn) {
+            return -1;
+        }
+        SHTONA(buffer, pad_offs, 0x0015);
+        SHTONA(buffer, pad_offs + 2, avail - 4);
+        memset(buffer + pad_offs + 4, 0, avail - 4);
     }
     SHTONA(buffer, 3, r_sz);
     SHTONA(buffer, 7, r_sz - 4);

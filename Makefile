@@ -3,6 +3,10 @@ TARGET = ciadpi
 CPPFLAGS = -D_DEFAULT_SOURCE
 CFLAGS += -I. -std=c99 -O2 -Wall -Wno-unused -Wextra -Wno-unused-parameter -pedantic
 WIN_LDFLAGS = -lws2_32 -lmswsock
+PYTHON ?= python3
+CLANG ?= clang
+SAN_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined
+FUZZ_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined
 
 HEADERS = conev.h desync.h error.h extend.h kavl.h mpool.h packets.h params.h proxy.h win_service.h
 SRC = packets.c main.c conev.c proxy.c desync.c mpool.c extend.c
@@ -10,6 +14,16 @@ WIN_SRC = win_service.c
 
 OBJ = $(SRC:.c=.o)
 WIN_OBJ = $(WIN_SRC:.c=.o)
+TEST_DIR := tests
+TEST_BIN_DIR := $(TEST_DIR)/bin
+PACKETS_CORPUS_DIR := $(TEST_DIR)/corpus/packets
+PACKETS_CORPUS_STAMP := $(PACKETS_CORPUS_DIR)/.stamp
+PACKETS_TEST_BIN := $(TEST_BIN_DIR)/test_packets
+PACKETS_TEST_SAN_BIN := $(TEST_BIN_DIR)/test_packets-sanitize
+FUZZ_PACKETS_BIN := $(TEST_BIN_DIR)/fuzz_packets
+SAN_TARGET := $(TARGET)-sanitize
+SAN_OBJ_DIR := $(TEST_BIN_DIR)/sanitize
+SAN_OBJ := $(addprefix $(SAN_OBJ_DIR)/,$(SRC:.c=.o))
 
 PREFIX := /usr/local
 INSTALL_DIR := $(DESTDIR)$(PREFIX)/bin/
@@ -26,9 +40,54 @@ $(OBJ): $(HEADERS)
 .c.o:
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $<
 
+$(PACKETS_CORPUS_STAMP): $(TEST_DIR)/generate_packets_corpus.py
+	mkdir -p $(PACKETS_CORPUS_DIR)
+	$(PYTHON) $(TEST_DIR)/generate_packets_corpus.py $(PACKETS_CORPUS_DIR)
+	touch $(PACKETS_CORPUS_STAMP)
+
+$(PACKETS_TEST_BIN): $(TEST_DIR)/test_packets.c $(TEST_DIR)/packets_exercise.c $(TEST_DIR)/packets_exercise.h packets.c packets.h
+	mkdir -p $(TEST_BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(TEST_DIR) $(TEST_DIR)/test_packets.c $(TEST_DIR)/packets_exercise.c packets.c -o $(PACKETS_TEST_BIN)
+
+$(PACKETS_TEST_SAN_BIN): $(TEST_DIR)/test_packets.c $(TEST_DIR)/packets_exercise.c $(TEST_DIR)/packets_exercise.h packets.c packets.h
+	mkdir -p $(TEST_BIN_DIR)
+	$(CLANG) $(CPPFLAGS) $(SAN_FLAGS) -I. -I$(TEST_DIR) $(TEST_DIR)/test_packets.c $(TEST_DIR)/packets_exercise.c packets.c -o $(PACKETS_TEST_SAN_BIN)
+
+$(SAN_OBJ_DIR)/%.o: %.c $(HEADERS)
+	mkdir -p $(dir $@)
+	$(CLANG) $(CPPFLAGS) $(SAN_FLAGS) -c $< -o $@
+
+$(SAN_TARGET): $(SAN_OBJ)
+	$(CLANG) $(SAN_FLAGS) -o $(SAN_TARGET) $(SAN_OBJ) $(LDFLAGS)
+
+$(FUZZ_PACKETS_BIN): $(TEST_DIR)/fuzz_packets.c $(TEST_DIR)/packets_exercise.c $(TEST_DIR)/packets_exercise.h packets.c packets.h
+	mkdir -p $(TEST_BIN_DIR)
+	$(CLANG) $(CPPFLAGS) $(FUZZ_FLAGS) -DTEST_STANDALONE_FUZZ -I. -I$(TEST_DIR) $(TEST_DIR)/fuzz_packets.c $(TEST_DIR)/packets_exercise.c packets.c -o $(FUZZ_PACKETS_BIN)
+
+packets-corpus: $(PACKETS_CORPUS_STAMP)
+
+test-packets: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_BIN)
+	$(PACKETS_TEST_BIN) $(PACKETS_CORPUS_DIR)
+
+test-integration: $(TARGET)
+	$(PYTHON) $(TEST_DIR)/test_proxy_integration.py --binary ./$(TARGET)
+
+test: test-packets test-integration
+
+test-sanitize: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_SAN_BIN) $(SAN_TARGET)
+	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PACKETS_TEST_SAN_BIN) $(PACKETS_CORPUS_DIR)
+	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PYTHON) $(TEST_DIR)/test_proxy_integration.py --binary ./$(SAN_TARGET)
+
+fuzz-packets: $(PACKETS_CORPUS_STAMP) $(FUZZ_PACKETS_BIN)
+	ASAN_OPTIONS=detect_leaks=0 $(FUZZ_PACKETS_BIN) $(PACKETS_CORPUS_DIR)
+
 clean:
-	rm -f $(TARGET) $(TARGET).exe $(OBJ) $(WIN_OBJ)
+	rm -f $(TARGET) $(SAN_TARGET) $(TARGET).exe $(OBJ) $(WIN_OBJ) $(SAN_OBJ) $(PACKETS_TEST_BIN) $(PACKETS_TEST_SAN_BIN) $(FUZZ_PACKETS_BIN)
+	rm -rf $(TEST_BIN_DIR)
+	rm -f $(PACKETS_CORPUS_STAMP) $(PACKETS_CORPUS_DIR)/*.bin
 
 install: $(TARGET)
 	mkdir -p $(INSTALL_DIR)
 	install -m 755 $(TARGET) $(INSTALL_DIR)
+
+.PHONY: all windows clean install packets-corpus test-packets test-integration test test-sanitize fuzz-packets

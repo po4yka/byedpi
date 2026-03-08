@@ -3,3 +3,7 @@ ciadpi.exe
 ciadpi
 *.o
 compile_flags.txt
+ciadpi-sanitize
+tests/bin/
+tests/corpus/packets/.stamp
+tests/corpus/packets/*.bin
