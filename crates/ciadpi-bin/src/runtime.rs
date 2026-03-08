@@ -9,13 +9,21 @@ use std::thread;
 use std::time::Duration;
 
 use crate::platform;
-use ciadpi_config::{DesyncGroup, RuntimeConfig};
-use ciadpi_desync::{plan_tcp, plan_udp, DesyncAction};
+use crate::runtime_policy::{
+    extract_host, select_initial_group, select_next_group, supports_trigger, ConnectionRoute,
+    RuntimeCache,
+};
+use ciadpi_config::{
+    DesyncGroup, DesyncMode, RuntimeConfig, DETECT_CONNECT, DETECT_HTTP_LOCAT, DETECT_TLS_ERR,
+    DETECT_TORST,
+};
+use ciadpi_desync::{build_fake_packet, plan_tcp, plan_udp, DesyncAction, DesyncPlan};
 use ciadpi_session::{
     encode_http_connect_reply, encode_socks4_reply, encode_socks5_reply,
     parse_http_connect_request, parse_socks4_request, parse_socks5_request, ClientRequest,
-    SessionConfig, SessionError, SessionState, SocketType, S_ATP_I4, S_ATP_I6, S_AUTH_BAD,
-    S_AUTH_NONE, S_CMD_CONN, S_ER_CMD, S_ER_CONN, S_ER_GEN, S_VER5,
+    SessionConfig, SessionError, SessionState, SocketType, TriggerEvent, detect_response_trigger,
+    S_ATP_I4, S_ATP_I6, S_AUTH_BAD, S_AUTH_NONE, S_CMD_CONN, S_ER_CMD, S_ER_CONN, S_ER_GEN,
+    S_VER5,
 };
 use mio::net::TcpListener as MioTcpListener;
 use mio::{Events, Interest, Poll, Token};
@@ -28,7 +36,7 @@ const DESYNC_SEED_BASE: u32 = 7;
 #[derive(Clone)]
 struct RuntimeState {
     config: Arc<RuntimeConfig>,
-    group: DesyncGroup,
+    cache: Arc<Mutex<RuntimeCache>>,
 }
 
 pub fn run_proxy(config: RuntimeConfig) -> io::Result<()> {
@@ -36,10 +44,10 @@ pub fn run_proxy(config: RuntimeConfig) -> io::Result<()> {
     if config.default_ttl == 0 {
         config.default_ttl = platform::detect_default_ttl()?;
     }
-    let group = config.groups[config.actionable_group()].clone();
+    let cache = RuntimeCache::load(&config);
     let state = RuntimeState {
         config: Arc::new(config),
-        group,
+        cache: Arc::new(Mutex::new(cache)),
     };
     let mut listener = build_listener(&state.config)?;
     let mut poll = Poll::new()?;
@@ -117,9 +125,9 @@ fn handle_socks4(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
     let parsed = parse_socks4_request(&request, session, &resolver);
     match parsed {
         Ok(ClientRequest::Socks4Connect(target)) => {
-            let mut upstream = connect_target(target.addr, state)?;
+            let (upstream, route) = connect_target(target.addr, state)?;
             client.write_all(encode_socks4_reply(true).as_bytes())?;
-            relay(client, &mut upstream, state)
+            relay(client, upstream, state, target.addr, route)
         }
         Ok(_) => {
             client.write_all(encode_socks4_reply(false).as_bytes())?;
@@ -147,12 +155,12 @@ fn handle_socks5(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
     match parse_socks5_request(&request, SocketType::Stream, session, &resolver) {
         Ok(ClientRequest::Socks5Connect(target)) => {
             match connect_target(target.addr, state) {
-                Ok(mut upstream) => {
+                Ok((upstream, route)) => {
                     let reply_addr = upstream
                         .local_addr()
                         .unwrap_or_else(|_| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
                     client.write_all(encode_socks5_reply(0, reply_addr).as_bytes())?;
-                    relay(client, &mut upstream, state)
+                    relay(client, upstream, state, target.addr, route)
                 }
                 Err(_) => {
                     let fail = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
@@ -187,9 +195,9 @@ fn handle_http_connect(mut client: TcpStream, state: &RuntimeState) -> io::Resul
     let resolver = |host: &str, socket_type: SocketType| resolve_name(host, socket_type, &state.config);
     match parse_http_connect_request(&request, &resolver) {
         Ok(ClientRequest::HttpConnect(target)) => match connect_target(target.addr, state) {
-            Ok(mut upstream) => {
+            Ok((upstream, route)) => {
                 client.write_all(encode_http_connect_reply(true).as_bytes())?;
-                relay(client, &mut upstream, state)
+                relay(client, upstream, state, target.addr, route)
             }
             Err(_) => {
                 client.write_all(encode_http_connect_reply(false).as_bytes())?;
@@ -212,7 +220,7 @@ fn handle_socks5_udp_associate(mut client: TcpStream, state: &RuntimeState) -> i
     let worker_socket = relay.try_clone()?;
     let worker_running = running.clone();
     let config = state.config.clone();
-    let group = state.group.clone();
+    let group = state.config.groups[state.config.actionable_group()].clone();
     let worker = thread::spawn(move || udp_associate_loop(worker_socket, config, group, worker_running));
 
     client.set_read_timeout(Some(Duration::from_millis(250)))?;
@@ -355,12 +363,63 @@ fn resolve_name(host: &str, _socket_type: SocketType, config: &RuntimeConfig) ->
         .find(|addr| config.ipv6 || addr.is_ipv4())
 }
 
-fn connect_target(target: SocketAddr, state: &RuntimeState) -> io::Result<TcpStream> {
-    if let Some(upstream) = state.group.ext_socks {
+fn connect_target(target: SocketAddr, state: &RuntimeState) -> io::Result<(TcpStream, ConnectionRoute)> {
+    let mut route = {
+        let mut cache = state
+            .cache
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+        select_initial_group(&state.config, &mut cache, target, None)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "no matching desync group"))?
+    };
+
+    loop {
+        match connect_target_via_group(target, state, route.group_index) {
+            Ok(stream) => return Ok((stream, route)),
+            Err(err) => {
+                let Some(next) = select_next_group(
+                    &state.config,
+                    &route,
+                    target,
+                    None,
+                    DETECT_CONNECT,
+                    true,
+                ) else {
+                    return Err(err);
+                };
+                {
+                    let mut cache = state
+                        .cache
+                        .lock()
+                        .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+                    cache.store(&state.config, target, next.group_index, None)?;
+                }
+                route = next;
+            }
+        }
+    }
+}
+
+fn connect_target_via_group(
+    target: SocketAddr,
+    state: &RuntimeState,
+    group_index: usize,
+) -> io::Result<TcpStream> {
+    let group = state
+        .config
+        .groups
+        .get(group_index)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing desync group"))?;
+    let stream = if let Some(upstream) = group.ext_socks {
         connect_via_socks(target, upstream.addr, state.config.listen.bind_ip)
     } else {
         connect_socket(target, state.config.listen.bind_ip)
+    }?;
+
+    if group.drop_sack {
+        platform::attach_drop_sack(&stream)?;
     }
+    Ok(stream)
 }
 
 fn connect_via_socks(target: SocketAddr, upstream: SocketAddr, bind_ip: IpAddr) -> io::Result<TcpStream> {
@@ -613,7 +672,104 @@ fn is_unspecified(ip: IpAddr) -> bool {
     }
 }
 
-fn relay(client: TcpStream, upstream: &mut TcpStream, state: &RuntimeState) -> io::Result<()> {
+fn relay(
+    mut client: TcpStream,
+    mut upstream: TcpStream,
+    state: &RuntimeState,
+    target: SocketAddr,
+    mut route: ConnectionRoute,
+) -> io::Result<()> {
+    let mut session_state = SessionState::default();
+
+    if needs_first_exchange(&state.config) {
+        let request_timeout = client.read_timeout()?;
+        if let Some(first_request) = read_optional_first_request(&mut client, request_timeout)? {
+            let original_request = first_request;
+            let host = extract_host(&original_request);
+
+            loop {
+                session_state = SessionState::default();
+                session_state.observe_outbound(&original_request);
+                let group = state.config.groups[route.group_index].clone();
+                if let Err(err) =
+                    send_with_group(&mut upstream, &state.config, &group, &original_request, 1)
+                {
+                    if !supports_trigger(&state.config, DETECT_TORST) {
+                        return Err(err);
+                    }
+                    let Some(next) = select_next_group(
+                        &state.config,
+                        &route,
+                        target,
+                        Some(&original_request),
+                        DETECT_TORST,
+                        true,
+                    ) else {
+                        return Err(err);
+                    };
+                    {
+                        let mut cache = state
+                            .cache
+                            .lock()
+                            .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+                        cache.store(&state.config, target, next.group_index, host.clone())?;
+                    }
+                    route = next;
+                    upstream = reconnect_target(target, state, route.clone(), host.clone())?.0;
+                    continue;
+                }
+
+                match read_first_response(
+                    &mut upstream,
+                    &state.config,
+                    &original_request,
+                    supports_trigger(&state.config, DETECT_TORST),
+                )? {
+                    FirstResponse::Forward(bytes) => {
+                        session_state.observe_inbound(&bytes);
+                        client.write_all(&bytes)?;
+                        break;
+                    }
+                    FirstResponse::NoData => break,
+                    FirstResponse::Trigger(trigger) => {
+                        let Some(next) = select_next_group(
+                            &state.config,
+                            &route,
+                            target,
+                            Some(&original_request),
+                            trigger_flag(trigger),
+                            true,
+                        ) else {
+                            return Err(io::Error::new(
+                                io::ErrorKind::ConnectionReset,
+                                "auto trigger exhausted all candidate groups",
+                            ));
+                        };
+                        {
+                            let mut cache = state
+                                .cache
+                                .lock()
+                                .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+                            cache.store(&state.config, target, next.group_index, host.clone())?;
+                        }
+                        route = next;
+                        upstream = reconnect_target(target, state, route.clone(), host.clone())?.0;
+                    }
+                }
+            }
+        }
+    }
+
+    relay_streams(client, upstream, state, route.group_index, session_state)
+}
+
+fn relay_streams(
+    client: TcpStream,
+    upstream: TcpStream,
+    state: &RuntimeState,
+    group_index: usize,
+    session_seed: SessionState,
+) -> io::Result<()> {
     client.set_read_timeout(None)?;
     client.set_write_timeout(None)?;
     upstream.set_read_timeout(None)?;
@@ -623,11 +779,17 @@ fn relay(client: TcpStream, upstream: &mut TcpStream, state: &RuntimeState) -> i
     let client_writer = client.try_clone()?;
     let upstream_reader = upstream.try_clone()?;
     let upstream_writer = upstream.try_clone()?;
-    let session_state = Arc::new(Mutex::new(SessionState::default()));
+    let session_state = Arc::new(Mutex::new(session_seed));
     let outbound_session = session_state.clone();
     let inbound_session = session_state.clone();
     let config = state.config.clone();
-    let group = state.group.clone();
+    let group = state
+        .config
+        .groups
+        .get(group_index)
+        .cloned()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing desync group"))?;
+    let drop_sack = group.drop_sack;
 
     let down = thread::spawn(move || copy_inbound_half(upstream_reader, client_writer, inbound_session));
     let up = thread::spawn(move || {
@@ -647,9 +809,160 @@ fn relay(client: TcpStream, upstream: &mut TcpStream, state: &RuntimeState) -> i
         .join()
         .map_err(|_| io::Error::new(io::ErrorKind::Other, "downstream thread panicked"))?;
 
+    if drop_sack {
+        let _ = platform::detach_drop_sack(&upstream);
+    }
+
     up_result?;
     down_result?;
     Ok(())
+}
+
+fn needs_first_exchange(config: &RuntimeConfig) -> bool {
+    supports_trigger(config, DETECT_HTTP_LOCAT)
+        || supports_trigger(config, DETECT_TLS_ERR)
+        || supports_trigger(config, DETECT_TORST)
+}
+
+fn read_optional_first_request(
+    client: &mut TcpStream,
+    fallback_timeout: Option<Duration>,
+) -> io::Result<Option<Vec<u8>>> {
+    client.set_read_timeout(Some(Duration::from_millis(250)))?;
+    let mut buffer = vec![0u8; 16_384];
+    let result = match client.read(&mut buffer) {
+        Ok(0) => Ok(None),
+        Ok(n) => {
+            buffer.truncate(n);
+            Ok(Some(buffer))
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) => Ok(None),
+        Err(err) => Err(err),
+    };
+    client.set_read_timeout(fallback_timeout)?;
+    result
+}
+
+fn read_first_response(
+    upstream: &mut TcpStream,
+    config: &RuntimeConfig,
+    request: &[u8],
+    torst_enabled: bool,
+) -> io::Result<FirstResponse> {
+    let timeout = first_response_timeout(config, request);
+    upstream.set_read_timeout(timeout)?;
+    let mut buffer = vec![0u8; config.buffer_size.max(16_384)];
+    let result = match upstream.read(&mut buffer) {
+        Ok(0) => {
+            if torst_enabled {
+                Ok(FirstResponse::Trigger(TriggerEvent::Torst))
+            } else {
+                Ok(FirstResponse::NoData)
+            }
+        }
+        Ok(n) => {
+            buffer.truncate(n);
+            if let Some(trigger) = detect_response_trigger(request, &buffer) {
+                Ok(FirstResponse::Trigger(trigger))
+            } else {
+                Ok(FirstResponse::Forward(buffer))
+            }
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            if torst_enabled && config.timeout_ms != 0 {
+                Ok(FirstResponse::Trigger(TriggerEvent::Torst))
+            } else {
+                Ok(FirstResponse::NoData)
+            }
+        }
+        Err(err)
+            if torst_enabled
+                && matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::InvalidInput
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::HostUnreachable
+                ) =>
+        {
+            Ok(FirstResponse::Trigger(TriggerEvent::Torst))
+        }
+        Err(err) => Err(err),
+    };
+    let _ = upstream.set_read_timeout(None);
+    result
+}
+
+fn first_response_timeout(config: &RuntimeConfig, request: &[u8]) -> Option<Duration> {
+    if config.partial_timeout_ms != 0 && ciadpi_packets::is_tls_client_hello(request) {
+        Some(Duration::from_millis(config.partial_timeout_ms as u64))
+    } else if config.timeout_ms != 0 {
+        Some(Duration::from_millis(config.timeout_ms as u64))
+    } else if needs_first_exchange(config) {
+        Some(Duration::from_millis(250))
+    } else {
+        None
+    }
+}
+
+fn reconnect_target(
+    target: SocketAddr,
+    state: &RuntimeState,
+    mut route: ConnectionRoute,
+    host: Option<String>,
+) -> io::Result<(TcpStream, ConnectionRoute)> {
+    loop {
+        match connect_target_via_group(target, state, route.group_index) {
+            Ok(stream) => return Ok((stream, route)),
+            Err(err) => {
+                let Some(next) = select_next_group(
+                    &state.config,
+                    &route,
+                    target,
+                    None,
+                    DETECT_CONNECT,
+                    true,
+                ) else {
+                    return Err(err);
+                };
+                {
+                    let mut cache = state
+                        .cache
+                        .lock()
+                        .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+                    cache.store(&state.config, target, next.group_index, host.clone())?;
+                }
+                route = next;
+            }
+        }
+    }
+}
+
+fn trigger_flag(trigger: TriggerEvent) -> u32 {
+    match trigger {
+        TriggerEvent::Redirect => DETECT_HTTP_LOCAT,
+        TriggerEvent::SslErr => DETECT_TLS_ERR,
+        TriggerEvent::Connect => DETECT_CONNECT,
+        TriggerEvent::Torst => DETECT_TORST,
+    }
+}
+
+enum FirstResponse {
+    Forward(Vec<u8>),
+    Trigger(TriggerEvent),
+    NoData,
 }
 
 fn copy_inbound_half(
@@ -694,19 +1007,32 @@ fn copy_outbound_half(
             state.observe_outbound(payload);
             state.round_count as i32
         };
-
-        if should_desync_tcp(&group, round) {
-            let seed = DESYNC_SEED_BASE + (round.saturating_sub(1) as u32);
-            match plan_tcp(&group, payload, seed, config.default_ttl) {
-                Ok(plan) => execute_tcp_actions(&mut writer, &plan.actions, config.default_ttl)?,
-                Err(_) => writer.write_all(payload)?,
-            }
-        } else {
-            writer.write_all(payload)?;
-        }
+        send_with_group(&mut writer, &config, &group, payload, round)?;
     }
     let _ = writer.shutdown(Shutdown::Write);
     let _ = reader.shutdown(Shutdown::Read);
+    Ok(())
+}
+
+fn send_with_group(
+    writer: &mut TcpStream,
+    config: &RuntimeConfig,
+    group: &DesyncGroup,
+    payload: &[u8],
+    round: i32,
+) -> io::Result<()> {
+    if should_desync_tcp(group, round) {
+        let seed = DESYNC_SEED_BASE + (round.saturating_sub(1) as u32);
+        match plan_tcp(group, payload, seed, config.default_ttl) {
+            Ok(plan) if group.parts.iter().any(|part| part.mode == DesyncMode::Fake) => {
+                execute_tcp_plan(writer, config, group, &plan, seed)?
+            }
+            Ok(plan) => execute_tcp_actions(writer, &plan.actions, config.default_ttl)?,
+            Err(_) => writer.write_all(payload)?,
+        }
+    } else {
+        writer.write_all(payload)?;
+    }
     Ok(())
 }
 
@@ -744,6 +1070,84 @@ fn execute_tcp_actions(
             DesyncAction::DetachDropSack => {}
             DesyncAction::AwaitWritable => {}
         }
+    }
+    Ok(())
+}
+
+fn execute_tcp_plan(
+    writer: &mut TcpStream,
+    config: &RuntimeConfig,
+    group: &DesyncGroup,
+    plan: &DesyncPlan,
+    seed: u32,
+) -> io::Result<()> {
+    let fake = build_fake_packet(group, &plan.tampered, seed).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "failed to build fake packet for tcp desync",
+        )
+    })?;
+
+    let mut cursor = 0usize;
+    for step in &plan.steps {
+        let start = usize::try_from(step.start)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative tcp plan start"))?;
+        let end = usize::try_from(step.end)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative tcp plan end"))?;
+        if start < cursor || end < start || end > plan.tampered.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid tcp desync step bounds",
+            ));
+        }
+        let chunk = &plan.tampered[start..end];
+
+        match step.mode {
+            DesyncMode::None | DesyncMode::Split => writer.write_all(chunk)?,
+            DesyncMode::Oob => {
+                send_out_of_band(writer, chunk, group.oob_data.unwrap_or(b'a'))?
+            }
+            DesyncMode::Disorder => {
+                set_stream_ttl(writer, 1)?;
+                writer.write_all(chunk)?;
+                if config.default_ttl != 0 {
+                    set_stream_ttl(writer, config.default_ttl)?;
+                }
+            }
+            DesyncMode::Disoob => {
+                set_stream_ttl(writer, 1)?;
+                send_out_of_band(writer, chunk, group.oob_data.unwrap_or(b'a'))?;
+                if config.default_ttl != 0 {
+                    set_stream_ttl(writer, config.default_ttl)?;
+                }
+            }
+            DesyncMode::Fake => {
+                let span = chunk.len();
+                let fake_end = fake.fake_offset.saturating_add(span).min(fake.bytes.len());
+                let fake_chunk = &fake.bytes[fake.fake_offset..fake_end];
+                if fake_chunk.len() != span {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "fake packet prefix length does not match original split span",
+                    ));
+                }
+                platform::send_fake_tcp(
+                    writer,
+                    chunk,
+                    fake_chunk,
+                    group.ttl.unwrap_or(8),
+                    group.md5sig,
+                    config.default_ttl,
+                    config.wait_send,
+                    Duration::from_millis(config.await_interval.max(1) as u64),
+                )?;
+            }
+        }
+        cursor = end;
+    }
+
+    if cursor < plan.tampered.len() {
+        writer.write_all(&plan.tampered[cursor..])?;
     }
     Ok(())
 }

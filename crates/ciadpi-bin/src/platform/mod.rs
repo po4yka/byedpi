@@ -1,5 +1,6 @@
 use std::io;
 use std::net::TcpStream;
+use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -24,4 +25,61 @@ pub fn set_tcp_md5sig(stream: &TcpStream, key_len: u16) -> io::Result<()> {
 #[cfg(not(target_os = "linux"))]
 pub fn set_tcp_md5sig(stream: &TcpStream, key_len: u16) -> io::Result<()> {
     stub::set_tcp_md5sig(stream, key_len)
+}
+
+#[cfg(target_os = "linux")]
+pub fn attach_drop_sack(stream: &TcpStream) -> io::Result<()> {
+    linux::attach_drop_sack(stream)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn attach_drop_sack(stream: &TcpStream) -> io::Result<()> {
+    stub::attach_drop_sack(stream)
+}
+
+#[cfg(target_os = "linux")]
+pub fn detach_drop_sack(stream: &TcpStream) -> io::Result<()> {
+    linux::detach_drop_sack(stream)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn detach_drop_sack(stream: &TcpStream) -> io::Result<()> {
+    stub::detach_drop_sack(stream)
+}
+
+#[cfg(target_os = "linux")]
+pub fn send_fake_tcp(
+    stream: &TcpStream,
+    original_prefix: &[u8],
+    fake_prefix: &[u8],
+    ttl: u8,
+    md5sig: bool,
+    default_ttl: u8,
+    wait_send: bool,
+    await_interval: Duration,
+) -> io::Result<()> {
+    linux::send_fake_tcp(
+        stream,
+        original_prefix,
+        fake_prefix,
+        ttl,
+        md5sig,
+        default_ttl,
+        wait_send,
+        await_interval,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn send_fake_tcp(
+    stream: &TcpStream,
+    _original_prefix: &[u8],
+    fake_prefix: &[u8],
+    ttl: u8,
+    md5sig: bool,
+    default_ttl: u8,
+    _wait_send: bool,
+    _await_interval: Duration,
+) -> io::Result<()> {
+    stub::send_fake_tcp(stream, fake_prefix, ttl, md5sig, default_ttl)
 }

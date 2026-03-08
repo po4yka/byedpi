@@ -5,6 +5,7 @@ use ciadpi_config::{parse_cli, ConfigError, ParseOutcome, StartupEnv, VERSION};
 
 mod platform;
 mod runtime;
+mod runtime_policy;
 
 fn help_text() -> String {
     let mut text = String::new();

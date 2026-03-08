@@ -17,7 +17,11 @@ This file freezes the current Linux-facing contract before the Rust cutover.
 | Desync fake generation | deterministic fake packet builder for custom HTTP payloads and TLS SNI rewrites on `FAKE_SUPPORT` platforms | `tests/test_contract.py::DesyncOracleTests` via `oracle_desync fake` |
 | Desync runtime | stream-visible `mod-http`, `tlsrec`, `tlsminor`, and `oob` behavior matches the C oracle and preserves upstream payload contracts | `tests/test_desync_runtime.py::DesyncRuntimeTests` |
 | Linux wire behavior | loopback packet-capture assertions for `split`, `oob`, `disorder`, `disoob`, and `fake` send-side payload chunking, TTL, and URG flags | `tests/test_desync_runtime.py::LinuxWireCaptureTests` |
+| Auto/runtime parity | cache-backed connect fallback plus `redirect`, `ssl_err`, and `torst` replay behavior match the C runtime contract | `tests/test_auto_runtime.py::AutoRuntimeTests` |
+| Linux routed behavior | multi-namespace end-to-end assertions for `fake`, `md5sig`, and `drop-sack` confirm original payload delivery across routed loss/rejection paths | `tests/test_linux_routed_runtime.py::RoutedLinuxRuntimeTests` |
 | Rust desync runtime | `ciadpi-rs` passes the same desync runtime and Linux loopback wire suite as the C binary | `make test-rust-desync-runtime`, `tests/test_desync_runtime.py` |
+| Rust auto/runtime parity | `ciadpi-rs` passes the same cache and auto-trigger replay suite as the C binary | `make test-rust-auto-runtime`, `tests/test_auto_runtime.py` |
+| Rust routed desync runtime | `ciadpi-rs` passes the same routed Linux fake/md5sig/drop-sack suite as the C binary | `make test-rust-linux-routed-runtime`, `tests/test_linux_routed_runtime.py` |
 | Rust binary parity | side-by-side `ciadpi` vs `ciadpi-rs` parity for `--help`, `--version`, and parse-failure surfaces; Rust dry-run acceptance for valid configs | `tests/test_rust_binary_parity.py`, `crates/ciadpi-bin/tests/cli.rs` |
 | Rust runtime subset | `ciadpi-rs` SOCKS4, SOCKS5 CONNECT, HTTP CONNECT, SOCKS5 UDP associate, UDP fake bursts, TLS tunneling, churn, no-domain rejection, no-udp rejection, connect failure handling, SOCKS chaining, and IPv6 echo where available | `tests/test_rust_runtime_subset.py` |
 | Proxy behavior | SOCKS4, SOCKS5, HTTP CONNECT, UDP associate, TLS tunneling, external SOCKS chaining, upstream connect failure handling, IPv6, `--no-domain`, `--no-udp`, `--udp-fake` bursts | `tests/test_proxy_integration.py` |
@@ -27,5 +31,4 @@ This file freezes the current Linux-facing contract before the Rust cutover.
 
 ## Planned follow-ups
 
-- Routed Linux namespace coverage for behaviors that require actual packet loss or rejection instead of loopback send-side assertions: `fake` retransmission order, `md5sig` rejection, and `drop-sack`.
 - Promotion thresholds for churn and benchmark regressions once the Rust binary is the active runtime path.
