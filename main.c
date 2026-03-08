@@ -6,6 +6,7 @@
 #include <ctype.h>
 
 #include "params.h"
+#include "app.h"
 #include "proxy.h"
 #include "packets.h"
 #include "error.h"
@@ -1304,6 +1305,58 @@ int init(void)
 }
 
 
+void apply_startup_env(void)
+{
+    const char *local_port = getenv("SS_LOCAL_PORT");
+    if (!local_port) {
+        return;
+    }
+    params.laddr.in.sin_port = htons(atoi(local_port));
+    #ifdef __linux__
+    if (!access("protect_path", F_OK)) {
+        params.protect_path = "protect_path";
+    }
+    #endif
+    params.shadowsocks = 1;
+}
+
+
+char *build_env_argv(int *argc, char ***argv)
+{
+    const char *env_options = getenv("SS_PLUGIN_OPTIONS");
+    if (!env_options) {
+        return 0;
+    }
+    char *cmd_line = calloc(strlen(env_options) + 1, 1);
+    if (!cmd_line) {
+        return 0;
+    }
+    strcpy(cmd_line, env_options);
+    
+    char **env_argv = calloc(64, sizeof(char *));
+    if (!env_argv) {
+        free(cmd_line);
+        return 0;
+    }
+    int env_argc = 1;
+    env_argv[0] = cmd_line;
+    
+    for (char *c = cmd_line; *c && env_argc < 64; c++) {
+        if (*c == ' ') {
+            *c = 0;
+            continue;
+        }
+        if (c == cmd_line || !c[-1]) {
+            env_argv[env_argc++] = c;
+        }
+    }
+    *argc = env_argc;
+    *argv = env_argv;
+    return cmd_line;
+}
+
+
+#ifndef CIADPI_NO_MAIN
 int main(int argc, char **argv) 
 {
     #ifdef _WIN32
@@ -1318,37 +1371,8 @@ int main(int argc, char **argv)
     }
     #endif
     
-    const char *local_port = getenv("SS_LOCAL_PORT");
-    if (local_port) {
-        params.laddr.in.sin_port = htons(atoi(local_port));
-        #ifdef __linux__
-        if (!access("protect_path", F_OK)) {
-            params.protect_path = "protect_path";
-        }
-        #endif
-        params.shadowsocks = 1;
-    }
-    char *cmd_line = 0;
-    const char *env_options = getenv("SS_PLUGIN_OPTIONS");
-    
-    if (env_options) {
-        cmd_line = calloc(strlen(env_options) + 1, 1);
-        strcpy(cmd_line, env_options);
-        
-        argc = 1;
-        argv = calloc(64, sizeof(char *));
-        argv[0] = cmd_line;
-        
-        for (char *c = cmd_line; *c && argc < 64; c++) {
-            if (*c == ' ') {
-                *c = 0;
-                continue;
-            }
-            if (c == cmd_line || !c[-1]) {
-                argv[argc++] = c;
-            }
-        }
-    }
+    apply_startup_env();
+    char *cmd_line = build_env_argv(&argc, &argv);
     
     int status = parse_args(argc, argv);
     if (status) {
@@ -1366,3 +1390,4 @@ int main(int argc, char **argv)
     clear_params(cmd_line, argv);
     return 0;
 }
+#endif

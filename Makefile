@@ -5,6 +5,7 @@ CFLAGS += -I. -std=c99 -O2 -Wall -Wno-unused -Wextra -Wno-unused-parameter -peda
 WIN_LDFLAGS = -lws2_32 -lmswsock
 PYTHON ?= python3
 CLANG ?= clang
+CARGO ?= cargo
 SAN_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined
 FUZZ_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined
 
@@ -21,6 +22,12 @@ PACKETS_CORPUS_STAMP := $(PACKETS_CORPUS_DIR)/.stamp
 PACKETS_TEST_BIN := $(TEST_BIN_DIR)/test_packets
 PACKETS_TEST_SAN_BIN := $(TEST_BIN_DIR)/test_packets-sanitize
 FUZZ_PACKETS_BIN := $(TEST_BIN_DIR)/fuzz_packets
+ORACLE_COMMON_SRC := $(TEST_DIR)/oracle_common.c
+ORACLE_PACKETS_BIN := $(TEST_BIN_DIR)/oracle_packets
+ORACLE_CONFIG_BIN := $(TEST_BIN_DIR)/oracle_config
+ORACLE_PROTOCOL_BIN := $(TEST_BIN_DIR)/oracle_protocol
+ORACLE_DESYNC_BIN := $(TEST_BIN_DIR)/oracle_desync
+ORACLE_BINS := $(ORACLE_PACKETS_BIN) $(ORACLE_CONFIG_BIN) $(ORACLE_PROTOCOL_BIN) $(ORACLE_DESYNC_BIN)
 SAN_TARGET := $(TARGET)-sanitize
 SAN_OBJ_DIR := $(TEST_BIN_DIR)/sanitize
 SAN_OBJ := $(addprefix $(SAN_OBJ_DIR)/,$(SRC:.c=.o))
@@ -64,6 +71,24 @@ $(FUZZ_PACKETS_BIN): $(TEST_DIR)/fuzz_packets.c $(TEST_DIR)/packets_exercise.c $
 	mkdir -p $(TEST_BIN_DIR)
 	$(CLANG) $(CPPFLAGS) $(FUZZ_FLAGS) -DTEST_STANDALONE_FUZZ -I. -I$(TEST_DIR) $(TEST_DIR)/fuzz_packets.c $(TEST_DIR)/packets_exercise.c packets.c -o $(FUZZ_PACKETS_BIN)
 
+$(ORACLE_PACKETS_BIN): $(TEST_DIR)/oracle_packets.c $(ORACLE_COMMON_SRC) $(PACKETS_CORPUS_STAMP) packets.c packets.h
+	mkdir -p $(TEST_BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(TEST_DIR) $(TEST_DIR)/oracle_packets.c $(ORACLE_COMMON_SRC) packets.c -o $(ORACLE_PACKETS_BIN)
+
+$(ORACLE_CONFIG_BIN): $(TEST_DIR)/oracle_config.c $(ORACLE_COMMON_SRC) $(SRC) $(HEADERS) app.h
+	mkdir -p $(TEST_BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DCIADPI_NO_MAIN -I$(TEST_DIR) $(TEST_DIR)/oracle_config.c $(ORACLE_COMMON_SRC) $(SRC) -o $(ORACLE_CONFIG_BIN)
+
+$(ORACLE_PROTOCOL_BIN): $(TEST_DIR)/oracle_protocol.c $(ORACLE_COMMON_SRC) $(SRC) $(HEADERS)
+	mkdir -p $(TEST_BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DCIADPI_NO_MAIN -I$(TEST_DIR) $(TEST_DIR)/oracle_protocol.c $(ORACLE_COMMON_SRC) $(SRC) -o $(ORACLE_PROTOCOL_BIN)
+
+$(ORACLE_DESYNC_BIN): $(TEST_DIR)/oracle_desync.c $(ORACLE_COMMON_SRC) $(SRC) $(HEADERS) app.h
+	mkdir -p $(TEST_BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DCIADPI_NO_MAIN -DCIADPI_TESTING -I$(TEST_DIR) $(TEST_DIR)/oracle_desync.c $(ORACLE_COMMON_SRC) $(SRC) -o $(ORACLE_DESYNC_BIN)
+
+oracles: $(ORACLE_BINS)
+
 packets-corpus: $(PACKETS_CORPUS_STAMP)
 
 test-packets: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_BIN)
@@ -72,22 +97,33 @@ test-packets: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_BIN)
 test-integration: $(TARGET)
 	$(PYTHON) $(TEST_DIR)/test_proxy_integration.py --binary ./$(TARGET)
 
-test: test-packets test-integration
+test-contract: $(TARGET) oracles packets-corpus
+	$(PYTHON) $(TEST_DIR)/test_contract.py --binary ./$(TARGET) --bin-dir ./$(TEST_BIN_DIR) --project-root .
 
-test-sanitize: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_SAN_BIN) $(SAN_TARGET)
+test-rust: oracles packets-corpus Cargo.toml
+	$(CARGO) test --workspace
+
+bench-smoke: oracles packets-corpus Cargo.toml
+	$(CARGO) test -p ciadpi-packets benchmark_smoke -- --ignored --nocapture
+
+test: test-packets test-contract test-integration test-rust
+
+test-sanitize: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_SAN_BIN) $(SAN_TARGET) oracles
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PACKETS_TEST_SAN_BIN) $(PACKETS_CORPUS_DIR)
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PYTHON) $(TEST_DIR)/test_proxy_integration.py --binary ./$(SAN_TARGET)
+	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PYTHON) $(TEST_DIR)/test_contract.py --binary ./$(SAN_TARGET) --bin-dir ./$(TEST_BIN_DIR) --project-root .
 
 fuzz-packets: $(PACKETS_CORPUS_STAMP) $(FUZZ_PACKETS_BIN)
 	ASAN_OPTIONS=detect_leaks=0 $(FUZZ_PACKETS_BIN) $(PACKETS_CORPUS_DIR)
 
 clean:
-	rm -f $(TARGET) $(SAN_TARGET) $(TARGET).exe $(OBJ) $(WIN_OBJ) $(SAN_OBJ) $(PACKETS_TEST_BIN) $(PACKETS_TEST_SAN_BIN) $(FUZZ_PACKETS_BIN)
+	rm -f $(TARGET) $(SAN_TARGET) $(TARGET).exe $(OBJ) $(WIN_OBJ) $(SAN_OBJ) $(PACKETS_TEST_BIN) $(PACKETS_TEST_SAN_BIN) $(FUZZ_PACKETS_BIN) $(ORACLE_BINS)
 	rm -rf $(TEST_BIN_DIR)
 	rm -f $(PACKETS_CORPUS_STAMP) $(PACKETS_CORPUS_DIR)/*.bin
+	rm -rf target
 
 install: $(TARGET)
 	mkdir -p $(INSTALL_DIR)
 	install -m 755 $(TARGET) $(INSTALL_DIR)
 
-.PHONY: all windows clean install packets-corpus test-packets test-integration test test-sanitize fuzz-packets
+.PHONY: all windows clean install oracles packets-corpus test-packets test-contract test-integration test-rust bench-smoke test test-sanitize fuzz-packets

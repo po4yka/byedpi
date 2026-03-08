@@ -230,7 +230,7 @@ int resp_error(int fd, int e, int flag)
 }
 
 
-static int s4_get_addr(const char *buff, 
+int s4_get_addr(const char *buff, 
         size_t n, union sockaddr_u *dst)
 {
     if (n < sizeof(struct s4_req) + 1) {
@@ -267,7 +267,7 @@ static int s4_get_addr(const char *buff,
 }
 
 
-static int s5_get_addr(const char *buffer, 
+int s5_get_addr(const char *buffer, 
         size_t n, union sockaddr_u *addr, int type) 
 {
     if (n < S_SIZE_MIN) {
@@ -344,7 +344,7 @@ int s5_set_addr(char *buffer, size_t n,
 }
 
 
-static int http_get_addr(
+int http_get_addr(
         const char *buff, size_t n, union sockaddr_u *dst)
 {
     char *host = 0;

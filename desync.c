@@ -517,6 +517,60 @@ static void tamp(char *buffer, size_t bfsize, ssize_t *n,
 }
 
 
+#ifdef CIADPI_TESTING
+int desync_plan_buffer(const char *input, size_t input_len, size_t buffer_size,
+        const struct desync_params *dp, unsigned int seed, char *output,
+        struct desync_plan_step *steps, size_t steps_cap,
+        struct desync_plan_result *result)
+{
+    if (!input || !dp || !output || buffer_size < input_len || !result) {
+        return -1;
+    }
+    memcpy(output, input, input_len);
+    if (buffer_size > input_len) {
+        memset(output + input_len, 0, buffer_size - input_len);
+    }
+    srand(seed);
+    ssize_t n = input_len;
+    struct proto_info info = { 0 };
+    tamp(output, buffer_size, &n, dp, &info);
+
+    long lp = 0;
+    struct part part = { 0 };
+    int i = 0, r = 0;
+    int step_count = 0;
+
+    for (; r > 0 || i < dp->parts_n; r--) {
+        if (r <= 0) {
+            part = dp->parts[i];
+            r = part.r; i++;
+        }
+        long pos = gen_offset(part.pos, part.flag, output, n, lp, &info);
+        pos += (long )part.s * (part.r - r);
+
+        if (pos < 0 || pos < lp) {
+            return -1;
+        }
+        if (pos > n) {
+            pos = n;
+        }
+        if ((size_t)step_count < steps_cap) {
+            steps[step_count].mode = part.m;
+            steps[step_count].start = lp;
+            steps[step_count].end = pos;
+        }
+        step_count++;
+        lp = pos;
+    }
+
+    result->tampered_len = n;
+    result->step_count = step_count;
+    result->info = info;
+    return 0;
+}
+#endif
+
+
 ssize_t desync(struct poolhd *pool, 
         struct eval *val, struct buffer *buff, ssize_t *np, bool *wait)
 {

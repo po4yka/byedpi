@@ -8,6 +8,7 @@ import socket
 import socketserver
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -100,6 +101,15 @@ class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
 
 
+class ThreadingTCPServerV6(ThreadingTCPServer):
+    address_family = socket.AF_INET6
+
+
+class ThreadingUDPServer(socketserver.ThreadingMixIn, socketserver.UDPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 class EchoHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         while True:
@@ -107,6 +117,12 @@ class EchoHandler(socketserver.BaseRequestHandler):
             if not data:
                 return
             self.request.sendall(data)
+
+
+class UDPEchoHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        data, sock = self.request
+        sock.sendto(data, self.client_address)
 
 
 class TLSHTTPHandler(socketserver.BaseRequestHandler):
@@ -135,9 +151,17 @@ class TLSServer(ThreadingTCPServer):
 
 
 class ProxyProcess:
-    def __init__(self, binary: str, http_connect: bool = False):
+    def __init__(
+        self,
+        binary: str,
+        http_connect: bool = False,
+        extra_args: list[str] | None = None,
+        env_updates: dict[str, str] | None = None,
+    ):
         self.binary = binary
         self.http_connect = http_connect
+        self.extra_args = extra_args or []
+        self.env_updates = env_updates or {}
         self.port = free_port()
         self._log = tempfile.NamedTemporaryFile(prefix="ciadpi-", suffix=".log", delete=False)
         self._proc: subprocess.Popen[str] | None = None
@@ -154,9 +178,11 @@ class ProxyProcess:
         ]
         if self.http_connect:
             args.append("-G")
+        args.extend(self.extra_args)
 
         env = os.environ.copy()
         env.setdefault("ASAN_OPTIONS", "detect_leaks=0")
+        env.update(self.env_updates)
         self._proc = subprocess.Popen(
             args,
             stdout=self._log,
@@ -200,18 +226,112 @@ class ProxyProcess:
         self.stop()
 
 
-def socks_connect(proxy_port: int, dst_port: int) -> socket.socket:
+def recv_socks5_reply(sock: socket.socket) -> bytes:
+    header = recv_exact(sock, 4)
+    atyp = header[3]
+    if atyp == 0x01:
+        tail = recv_exact(sock, 6)
+    elif atyp == 0x04:
+        tail = recv_exact(sock, 18)
+    elif atyp == 0x03:
+        size = recv_exact(sock, 1)[0]
+        tail = bytes([size]) + recv_exact(sock, size + 2)
+    else:
+        raise AssertionError(f"unsupported SOCKS5 reply ATYP: {atyp}")
+    return header + tail
+
+
+def parse_socks5_reply(reply: bytes) -> tuple[int, str, int]:
+    atyp = reply[3]
+    if atyp == 0x01:
+        return reply[1], socket.inet_ntoa(reply[4:8]), int.from_bytes(reply[8:10], "big")
+    if atyp == 0x04:
+        return (
+            reply[1],
+            socket.inet_ntop(socket.AF_INET6, reply[4:20]),
+            int.from_bytes(reply[20:22], "big"),
+        )
+    if atyp == 0x03:
+        size = reply[4]
+        host = reply[5 : 5 + size].decode("ascii")
+        port = int.from_bytes(reply[5 + size : 7 + size], "big")
+        return reply[1], host, port
+    raise AssertionError(f"unsupported SOCKS5 reply ATYP: {atyp}")
+
+
+def socks_auth(proxy_port: int) -> socket.socket:
     sock = socket.create_connection(("127.0.0.1", proxy_port), timeout=5)
     sock.sendall(b"\x05\x01\x00")
     if recv_exact(sock, 2) != b"\x05\x00":
         raise AssertionError("SOCKS5 auth negotiation failed")
+    return sock
 
+
+def socks_connect(proxy_port: int, dst_port: int) -> socket.socket:
+    sock = socks_auth(proxy_port)
     request = b"\x05\x01\x00\x01" + socket.inet_aton("127.0.0.1") + dst_port.to_bytes(2, "big")
     sock.sendall(request)
-    reply = recv_exact(sock, 10)
-    if reply[:2] != b"\x05\x00":
+    reply = recv_socks5_reply(sock)
+    if parse_socks5_reply(reply)[0] != 0:
         raise AssertionError(f"SOCKS5 connect failed: {reply!r}")
     return sock
+
+
+def socks4_connect(proxy_port: int, dst_port: int) -> socket.socket:
+    sock = socket.create_connection(("127.0.0.1", proxy_port), timeout=5)
+    request = b"\x04\x01" + dst_port.to_bytes(2, "big") + socket.inet_aton("127.0.0.1") + b"user\x00"
+    sock.sendall(request)
+    reply = recv_exact(sock, 8)
+    if reply[1] != 0x5A:
+        raise AssertionError(f"SOCKS4 connect failed: {reply!r}")
+    return sock
+
+
+def socks_connect_domain(proxy_port: int, host: str, dst_port: int) -> tuple[socket.socket, bytes]:
+    sock = socks_auth(proxy_port)
+    host_bytes = host.encode("ascii")
+    request = b"\x05\x01\x00\x03" + bytes([len(host_bytes)]) + host_bytes + dst_port.to_bytes(2, "big")
+    sock.sendall(request)
+    return sock, recv_socks5_reply(sock)
+
+
+def socks_connect_ipv6(proxy_port: int, host: str, dst_port: int) -> socket.socket:
+    sock = socks_auth(proxy_port)
+    request = (
+        b"\x05\x01\x00\x04"
+        + socket.inet_pton(socket.AF_INET6, host)
+        + dst_port.to_bytes(2, "big")
+    )
+    sock.sendall(request)
+    reply = recv_socks5_reply(sock)
+    if parse_socks5_reply(reply)[0] != 0:
+        raise AssertionError(f"SOCKS5 IPv6 connect failed: {reply!r}")
+    return sock
+
+
+def socks_udp_associate(proxy_port: int) -> tuple[socket.socket, tuple[str, int]]:
+    sock = socks_auth(proxy_port)
+    request = b"\x05\x03\x00\x01" + socket.inet_aton("0.0.0.0") + b"\x00\x00"
+    sock.sendall(request)
+    reply = recv_socks5_reply(sock)
+    code, relay_host, relay_port = parse_socks5_reply(reply)
+    if code != 0:
+        raise AssertionError(f"SOCKS5 UDP associate failed: {reply!r}")
+    return sock, (relay_host, relay_port)
+
+
+def udp_proxy_roundtrip(relay: tuple[str, int], dst_port: int, payload: bytes) -> bytes:
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_sock.settimeout(5)
+    try:
+        packet = b"\x00\x00\x00\x01" + socket.inet_aton("127.0.0.1") + dst_port.to_bytes(2, "big") + payload
+        udp_sock.sendto(packet, relay)
+        response, _ = udp_sock.recvfrom(4096)
+        if response[:4] != b"\x00\x00\x00\x01":
+            raise AssertionError(f"unexpected UDP header: {response!r}")
+        return response[10:]
+    finally:
+        udp_sock.close()
 
 
 def http_connect(proxy_port: int, dst_port: int) -> socket.socket:
@@ -255,11 +375,27 @@ class ProxyIntegrationTests(unittest.TestCase):
         keyfile.write_text(KEY_PEM)
         return TLSServer(str(certfile), str(keyfile))
 
+    def _maybe_ipv6_server(self) -> socketserver.TCPServer | None:
+        if not socket.has_ipv6:
+            return None
+        try:
+            return ThreadingTCPServerV6(("::1", 0), EchoHandler)
+        except OSError:
+            return None
+
     def test_socks5_echo(self) -> None:
         echo_server = self._start_server(ThreadingTCPServer(("127.0.0.1", 0), EchoHandler))
         with ProxyProcess(PROXY_BINARY) as proxy:
             with socks_connect(proxy.port, echo_server.server_address[1]) as sock:
                 payload = b"plain socks payload"
+                sock.sendall(payload)
+                self.assertEqual(recv_exact(sock, len(payload)), payload)
+
+    def test_socks4_echo(self) -> None:
+        echo_server = self._start_server(ThreadingTCPServer(("127.0.0.1", 0), EchoHandler))
+        with ProxyProcess(PROXY_BINARY) as proxy:
+            with socks4_connect(proxy.port, echo_server.server_address[1]) as sock:
+                payload = b"plain socks4 payload"
                 sock.sendall(payload)
                 self.assertEqual(recv_exact(sock, len(payload)), payload)
 
@@ -288,6 +424,63 @@ class ProxyIntegrationTests(unittest.TestCase):
                 response = recv_until(tls_sock, b"proxy tls ok")
                 self.assertIn(b"HTTP/1.1 200 OK", response)
                 self.assertTrue(response.endswith(b"proxy tls ok"))
+
+    def test_socks5_udp_associate_echo(self) -> None:
+        udp_server = self._start_server(ThreadingUDPServer(("127.0.0.1", 0), UDPEchoHandler))
+        with ProxyProcess(PROXY_BINARY) as proxy:
+            control_sock, relay = socks_udp_associate(proxy.port)
+            with control_sock:
+                payload = b"udp proxy payload"
+                self.assertEqual(
+                    udp_proxy_roundtrip(relay, udp_server.server_address[1], payload),
+                    payload,
+                )
+
+    def test_connection_churn_echo(self) -> None:
+        echo_server = self._start_server(ThreadingTCPServer(("127.0.0.1", 0), EchoHandler))
+        with ProxyProcess(PROXY_BINARY) as proxy:
+            for idx in range(25):
+                with socks_connect(proxy.port, echo_server.server_address[1]) as sock:
+                    payload = f"burst-{idx}".encode("ascii")
+                    sock.sendall(payload)
+                    self.assertEqual(recv_exact(sock, len(payload)), payload)
+
+    def test_no_domain_rejects_domain_requests(self) -> None:
+        with ProxyProcess(PROXY_BINARY, extra_args=["-N"]) as proxy:
+            sock, reply = socks_connect_domain(proxy.port, "localhost", 80)
+            with sock:
+                self.assertNotEqual(parse_socks5_reply(reply)[0], 0)
+
+    def test_no_udp_rejects_udp_associate(self) -> None:
+        with ProxyProcess(PROXY_BINARY, extra_args=["-U"]) as proxy:
+            sock = socks_auth(proxy.port)
+            with sock:
+                request = b"\x05\x03\x00\x01" + socket.inet_aton("0.0.0.0") + b"\x00\x00"
+                sock.sendall(request)
+                reply = recv_socks5_reply(sock)
+                self.assertNotEqual(parse_socks5_reply(reply)[0], 0)
+
+    def test_external_socks_chain(self) -> None:
+        echo_server = self._start_server(ThreadingTCPServer(("127.0.0.1", 0), EchoHandler))
+        with ProxyProcess(PROXY_BINARY) as upstream:
+            with ProxyProcess(PROXY_BINARY, extra_args=["-C", f"127.0.0.1:{upstream.port}"]) as proxy:
+                with socks_connect(proxy.port, echo_server.server_address[1]) as sock:
+                    payload = b"chained socks payload"
+                    sock.sendall(payload)
+                    self.assertEqual(recv_exact(sock, len(payload)), payload)
+
+    def test_socks5_ipv6_echo(self) -> None:
+        if not sys.platform.startswith("linux"):
+            self.skipTest("IPv6 parity is gated on Linux")
+        server = self._maybe_ipv6_server()
+        if server is None:
+            self.skipTest("IPv6 loopback is unavailable")
+        echo_server = self._start_server(server)
+        with ProxyProcess(PROXY_BINARY) as proxy:
+            with socks_connect_ipv6(proxy.port, "::1", echo_server.server_address[1]) as sock:
+                payload = b"ipv6 socks payload"
+                sock.sendall(payload)
+                self.assertEqual(recv_exact(sock, len(payload)), payload)
 
 
 def main() -> int:

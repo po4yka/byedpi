@@ -1,0 +1,10 @@
+[package]
+name = "ciadpi-desync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ciadpi-config = { path = "../ciadpi-config" }
+ciadpi-packets = { path = "../ciadpi-packets" }
+ciadpi-session = { path = "../ciadpi-session" }

@@ -88,6 +88,12 @@ void map_fix(union sockaddr_u *addr, char f6);
 
 int resp_error(int fd, int e, int flag);
 
+int s4_get_addr(const char *buff, size_t n, union sockaddr_u *dst);
+
+int s5_get_addr(const char *buffer, size_t n, union sockaddr_u *addr, int type);
+
+int http_get_addr(const char *buff, size_t n, union sockaddr_u *dst);
+
 int create_conn(struct poolhd *pool,
         struct eval *val, const union sockaddr_u *dst, evcb_t next);
 

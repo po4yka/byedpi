@@ -30,6 +30,25 @@ struct proto_info {
     int host_len, host_pos;
 };
 
+#ifdef CIADPI_TESTING
+struct desync_plan_step {
+    int mode;
+    long start;
+    long end;
+};
+
+struct desync_plan_result {
+    ssize_t tampered_len;
+    int step_count;
+    struct proto_info info;
+};
+
+int desync_plan_buffer(const char *input, size_t input_len, size_t buffer_size,
+        const struct desync_params *dp, unsigned int seed, char *output,
+        struct desync_plan_step *steps, size_t steps_cap,
+        struct desync_plan_result *result);
+#endif
+
 static long gen_offset(long pos, int flag,
         const char *buffer, size_t n, long lp, struct proto_info *info);
 #endif
