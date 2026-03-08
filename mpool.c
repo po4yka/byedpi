@@ -1,5 +1,6 @@
 #include "mpool.h"
 
+#include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -161,6 +162,9 @@ void dump_cache(struct mphdr *hdr, FILE *out, struct desync_params *dp)
     kavl_itr_first(my, hdr->root, &itr);
     do {
         struct elem_i *p = (struct elem_i *)kavl_at(&itr);
+        if (!p || !p->main.data) {
+            continue;
+        }
         struct cache_key *key = (struct cache_key *)p->main.data;
         
         if (p->dp != dp) {
@@ -184,19 +188,20 @@ void dump_cache(struct mphdr *hdr, FILE *out, struct desync_params *dp)
 
 void load_cache(struct mphdr *hdr, FILE *in, struct desync_params *dp)
 {
-    for (int i = 0; ; i++) {
+    char line[512];
+    while (fgets(line, sizeof(line), in)) {
         char addr_str[INET6_ADDRSTRLEN] = { 0 };
         char host[256] = { 0 };
         
         int bitlen;
         uint16_t port;
-        time_t cache_time;
+        intmax_t cache_time_raw;
         
-        int c = fscanf(in, "0 %39s %d %hu %jd %255s\n", 
-            addr_str, &bitlen, &port, &cache_time, host);
-        if (c < 1) {
-            return;
+        if (sscanf(line, "0 %39s %d %hu %jd %255s",
+                addr_str, &bitlen, &port, &cache_time_raw, host) != 5) {
+            continue;
         }
+        time_t cache_time = (time_t)cache_time_raw;
         struct cache_key key = { 0 };
         int key_size = offsetof(struct cache_key, ip.v4);
         bitlen += key_size * 8;
@@ -239,4 +244,3 @@ void load_cache(struct mphdr *hdr, FILE *in, struct desync_params *dp)
         }
     }
 }
-

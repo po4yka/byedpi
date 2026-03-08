@@ -38,7 +38,7 @@ struct poolhd *init_pool(int count)
     for (int i = 0; i < count; i++) {
         pool->links[i] = &(pool->items[i]);
     }
-    memset(pool->items, 0, sizeof(*pool->items));
+    memset(pool->items, 0, sizeof(*pool->items) * count);
     return pool;
 }
 
@@ -389,4 +389,3 @@ void buff_destroy(struct buffer *root)
     }
     LOG(LOG_S, "buffers count: %d\n", i);
 }
-

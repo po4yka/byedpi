@@ -237,7 +237,7 @@ static int resize_ech_ext(char *buffer,
     SHTONA(buffer, ech_offs + 2, ech_sz + inc);
     SHTONA(buffer, pay_offs, pay_sz + inc);
     
-    memmove(buffer + ech_end + inc, buffer + ech_end, n - (ech_end + inc));
+    memmove(buffer + ech_end + inc, buffer + ech_end, (size_t)(n - ech_end));
     return inc;
 }
 

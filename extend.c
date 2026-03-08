@@ -733,6 +733,12 @@ ssize_t tcp_recv_hook(struct poolhd *pool,
             val->pair->part_sent = 0;
         }
     }
+    if (val->flag == FLAG_CONN) {
+        if (!val->pair || !val->pair->dp) {
+            LOG(LOG_E, "broken connection state: fd=%d\n", val->fd);
+            return -1;
+        }
+    }
     if (val->flag == FLAG_CONN && !val->round_sent) {
         int *nr = val->pair->dp->rounds;
         
@@ -812,9 +818,14 @@ ssize_t udp_hook(struct eval *val,
 #ifdef __linux__
 static int protect(int conn_fd, const char *path)
 {
-    struct sockaddr_un sa;
+    struct sockaddr_un sa = { 0 };
     sa.sun_family = AF_UNIX;
-    strcpy(sa.sun_path, path);
+    size_t path_len = strlen(path);
+    if (path_len >= sizeof(sa.sun_path)) {
+        LOG(LOG_E, "protect path is too long\n");
+        return -1;
+    }
+    memcpy(sa.sun_path, path, path_len + 1);
     
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {

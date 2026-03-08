@@ -564,6 +564,10 @@ void *add(void **root, int *n, size_t ss)
 
 static struct desync_params *add_group(struct desync_params *prev)
 {
+    if ((size_t)params.dp_n >= (sizeof(uint64_t) * CHAR_BIT)) {
+        LOG(LOG_E, "too many groups!\n");
+        return 0;
+    }
     struct desync_params *dp = calloc(1, sizeof(*prev));
     if (!dp) {
         return 0;
@@ -573,7 +577,7 @@ static struct desync_params *add_group(struct desync_params *prev)
         prev->next = dp;
     }
     dp->id = params.dp_n;
-    dp->bit = 1 << dp->id;
+    dp->bit = UINT64_C(1) << dp->id;
     dp->str = "";
     
     params.dp_n++;
