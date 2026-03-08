@@ -1,12 +1,15 @@
 use std::io::{self, Read, Write};
 use std::net::{
-    IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
+    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
+    UdpSocket,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use ciadpi_config::{DesyncGroup, RuntimeConfig};
+use ciadpi_desync::{plan_udp, DesyncAction};
 use ciadpi_session::{
     encode_http_connect_reply, encode_socks4_reply, encode_socks5_reply,
     parse_http_connect_request, parse_socks4_request, parse_socks5_request, ClientRequest,
@@ -152,11 +155,13 @@ fn handle_socks5(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
                 }
             }
         }
-        Ok(ClientRequest::Socks5UdpAssociate(_)) => {
-            let code = if state.config.udp { S_ER_CMD } else { S_ER_CMD };
-            let fail = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-            client.write_all(encode_socks5_reply(code, fail).as_bytes())?;
-            Ok(())
+        Ok(ClientRequest::Socks5UdpAssociate(_target)) => {
+            if !state.config.udp {
+                let fail = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+                client.write_all(encode_socks5_reply(S_ER_CMD, fail).as_bytes())?;
+                return Ok(());
+            }
+            handle_socks5_udp_associate(client, state)
         }
         Ok(_) => {
             let fail = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
@@ -190,6 +195,42 @@ fn handle_http_connect(mut client: TcpStream, state: &RuntimeState) -> io::Resul
             Ok(())
         }
     }
+}
+
+fn handle_socks5_udp_associate(mut client: TcpStream, state: &RuntimeState) -> io::Result<()> {
+    let relay = build_udp_relay_socket(client.local_addr()?.ip())?;
+    let reply_addr = relay.local_addr()?;
+    client.write_all(encode_socks5_reply(0, reply_addr).as_bytes())?;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let worker_socket = relay.try_clone()?;
+    let worker_running = running.clone();
+    let config = state.config.clone();
+    let group = state.group.clone();
+    let worker = thread::spawn(move || udp_associate_loop(worker_socket, config, group, worker_running));
+
+    client.set_read_timeout(Some(Duration::from_millis(250)))?;
+    let mut buffer = [0u8; 64];
+    loop {
+        match client.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => break,
+        }
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
+    }
+
+    running.store(false, Ordering::Relaxed);
+    worker
+        .join()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "udp relay thread panicked"))?
 }
 
 fn negotiate_socks5(client: &mut TcpStream) -> io::Result<()> {
@@ -383,6 +424,150 @@ fn read_upstream_socks_reply(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid upstream socks reply")),
     }
     Ok(out)
+}
+
+fn build_udp_relay_socket(ip: IpAddr) -> io::Result<UdpSocket> {
+    let bind_addr = SocketAddr::new(ip, 0);
+    let domain = match bind_addr {
+        SocketAddr::V4(_) => Domain::IPV4,
+        SocketAddr::V6(_) => Domain::IPV6,
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&SockAddr::from(bind_addr))?;
+    let socket: UdpSocket = socket.into();
+    socket.set_read_timeout(Some(Duration::from_millis(250)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(5)))?;
+    Ok(socket)
+}
+
+fn udp_associate_loop(
+    relay: UdpSocket,
+    config: Arc<RuntimeConfig>,
+    group: DesyncGroup,
+    running: Arc<AtomicBool>,
+) -> io::Result<()> {
+    let mut udp_client_addr = None;
+    let mut buffer = [0u8; 65_535];
+
+    while running.load(Ordering::Relaxed) {
+        match relay.recv_from(&mut buffer) {
+            Ok((n, sender)) => {
+                let known_client = udp_client_addr;
+                if known_client.is_none() || known_client == Some(sender) {
+                    udp_client_addr = Some(sender);
+                    let Some((target, payload)) =
+                        parse_socks5_udp_packet(&buffer[..n], &config)
+                    else {
+                        continue;
+                    };
+                    let actions = plan_udp(&group, payload, config.default_ttl);
+                    execute_udp_actions(&relay, target, &actions)?;
+                } else if let Some(client_addr) = udp_client_addr {
+                    let packet = encode_socks5_udp_packet(sender, &buffer[..n]);
+                    relay.send_to(&packet, client_addr)?;
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_socks5_udp_packet<'a>(
+    packet: &'a [u8],
+    config: &RuntimeConfig,
+) -> Option<(SocketAddr, &'a [u8])> {
+    if packet.len() < 4 || packet[2] != 0 {
+        return None;
+    }
+    let atyp = packet[3];
+    match atyp {
+        S_ATP_I4 => {
+            if packet.len() < 10 {
+                return None;
+            }
+            let ip = Ipv4Addr::new(packet[4], packet[5], packet[6], packet[7]);
+            let port = u16::from_be_bytes([packet[8], packet[9]]);
+            Some((SocketAddr::new(IpAddr::V4(ip), port), &packet[10..]))
+        }
+        S_ATP_I6 => {
+            if packet.len() < 22 || !config.ipv6 {
+                return None;
+            }
+            let mut raw = [0u8; 16];
+            raw.copy_from_slice(&packet[4..20]);
+            let port = u16::from_be_bytes([packet[20], packet[21]]);
+            Some((SocketAddr::new(IpAddr::V6(Ipv6Addr::from(raw)), port), &packet[22..]))
+        }
+        0x03 => {
+            let len = *packet.get(4)? as usize;
+            let offset = 5 + len;
+            if packet.len() < offset + 2 || !config.resolve {
+                return None;
+            }
+            let host = std::str::from_utf8(&packet[5..offset]).ok()?;
+            let port = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
+            let resolved = resolve_name(host, SocketType::Datagram, config)?;
+            Some((SocketAddr::new(resolved.ip(), port), &packet[offset + 2..]))
+        }
+        _ => None,
+    }
+}
+
+fn encode_socks5_udp_packet(sender: SocketAddr, payload: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0, 0, 0];
+    match sender {
+        SocketAddr::V4(addr) => {
+            packet.push(S_ATP_I4);
+            packet.extend_from_slice(&addr.ip().octets());
+            packet.extend_from_slice(&addr.port().to_be_bytes());
+        }
+        SocketAddr::V6(addr) => {
+            packet.push(S_ATP_I6);
+            packet.extend_from_slice(&addr.ip().octets());
+            packet.extend_from_slice(&addr.port().to_be_bytes());
+        }
+    }
+    packet.extend_from_slice(payload);
+    packet
+}
+
+fn execute_udp_actions(
+    relay: &UdpSocket,
+    target: SocketAddr,
+    actions: &[DesyncAction],
+) -> io::Result<()> {
+    for action in actions {
+        match action {
+            DesyncAction::Write(bytes) => {
+                relay.send_to(bytes, target)?;
+            }
+            DesyncAction::SetTtl(ttl) => {
+                set_udp_ttl(relay, target, *ttl)?;
+            }
+            DesyncAction::RestoreDefaultTtl => {}
+            DesyncAction::WriteUrgent { .. }
+            | DesyncAction::SetMd5Sig { .. }
+            | DesyncAction::AttachDropSack
+            | DesyncAction::DetachDropSack
+            | DesyncAction::AwaitWritable => {}
+        }
+    }
+    Ok(())
+}
+
+fn set_udp_ttl(relay: &UdpSocket, target: SocketAddr, ttl: u8) -> io::Result<()> {
+    match target {
+        SocketAddr::V4(_) => relay.set_ttl(ttl as u32),
+        SocketAddr::V6(_) => Ok(()),
+    }
 }
 
 fn connect_socket(target: SocketAddr, bind_ip: IpAddr) -> io::Result<TcpStream> {
