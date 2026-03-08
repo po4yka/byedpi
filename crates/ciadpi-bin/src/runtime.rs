@@ -1238,60 +1238,82 @@ fn read_first_response(
     request: &[u8],
     torst_enabled: bool,
 ) -> io::Result<FirstResponse> {
-    let timeout = first_response_timeout(config, request);
-    upstream.set_read_timeout(timeout)?;
-    let mut buffer = vec![0u8; config.buffer_size.max(16_384)];
-    let result = match upstream.read(&mut buffer) {
-        Ok(0) => {
-            if torst_enabled {
-                Ok(FirstResponse::Trigger(TriggerEvent::Torst))
-            } else {
-                Ok(FirstResponse::NoData)
+    let mut collected = Vec::new();
+    let mut chunk = vec![0u8; config.buffer_size.max(16_384)];
+    let mut tls_partial = TlsRecordTracker::new(request, config);
+    let mut timeout_count = 0i32;
+
+    loop {
+        upstream.set_read_timeout(first_response_timeout(config, &tls_partial))?;
+        let result = match upstream.read(&mut chunk) {
+            Ok(0) => {
+                if torst_enabled {
+                    Ok(FirstResponse::Trigger(TriggerEvent::Torst))
+                } else {
+                    Ok(FirstResponse::NoData)
+                }
             }
-        }
-        Ok(n) => {
-            buffer.truncate(n);
-            if let Some(trigger) = detect_response_trigger(request, &buffer) {
-                Ok(FirstResponse::Trigger(trigger))
-            } else {
-                Ok(FirstResponse::Forward(buffer))
+            Ok(n) => {
+                collected.extend_from_slice(&chunk[..n]);
+                tls_partial.observe(&chunk[..n]);
+
+                if tls_partial.waiting_for_tls_record() {
+                    continue;
+                }
+
+                if let Some(trigger) = detect_response_trigger(request, &collected) {
+                    if response_trigger_supported(config, trigger) {
+                        Ok(FirstResponse::Trigger(trigger))
+                    } else {
+                        Ok(FirstResponse::Forward(collected))
+                    }
+                } else {
+                    Ok(FirstResponse::Forward(collected))
+                }
             }
-        }
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) =>
-        {
-            if torst_enabled && config.timeout_ms != 0 {
-                Ok(FirstResponse::Trigger(TriggerEvent::Torst))
-            } else {
-                Ok(FirstResponse::NoData)
-            }
-        }
-        Err(err)
-            if torst_enabled
-                && matches!(
+            Err(err)
+                if matches!(
                     err.kind(),
-                    io::ErrorKind::ConnectionReset
-                        | io::ErrorKind::ConnectionAborted
-                        | io::ErrorKind::BrokenPipe
-                        | io::ErrorKind::ConnectionRefused
-                        | io::ErrorKind::InvalidInput
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::HostUnreachable
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
-        {
-            Ok(FirstResponse::Trigger(TriggerEvent::Torst))
-        }
-        Err(err) => Err(err),
-    };
-    let _ = upstream.set_read_timeout(None);
-    result
+            {
+                if torst_enabled && tls_partial.waiting_for_tls_record() {
+                    timeout_count += 1;
+                    if timeout_count >= timeout_count_limit(config) {
+                        Ok(FirstResponse::Trigger(TriggerEvent::Torst))
+                    } else {
+                        continue;
+                    }
+                } else if torst_enabled && config.timeout_ms != 0 {
+                    Ok(FirstResponse::Trigger(TriggerEvent::Torst))
+                } else {
+                    Ok(FirstResponse::NoData)
+                }
+            }
+            Err(err)
+                if torst_enabled
+                    && matches!(
+                        err.kind(),
+                        io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::ConnectionRefused
+                            | io::ErrorKind::InvalidInput
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::HostUnreachable
+                    ) =>
+            {
+                Ok(FirstResponse::Trigger(TriggerEvent::Torst))
+            }
+            Err(err) => Err(err),
+        };
+        let _ = upstream.set_read_timeout(None);
+        return result;
+    }
 }
 
-fn first_response_timeout(config: &RuntimeConfig, request: &[u8]) -> Option<Duration> {
-    if config.partial_timeout_ms != 0 && ciadpi_packets::is_tls_client_hello(request) {
+fn first_response_timeout(config: &RuntimeConfig, tls_partial: &TlsRecordTracker) -> Option<Duration> {
+    if tls_partial.active() {
         Some(Duration::from_millis(config.partial_timeout_ms as u64))
     } else if config.timeout_ms != 0 {
         Some(Duration::from_millis(config.timeout_ms as u64))
@@ -1303,6 +1325,102 @@ fn first_response_timeout(config: &RuntimeConfig, request: &[u8]) -> Option<Dura
         Some(Duration::from_millis(250))
     } else {
         None
+    }
+}
+
+fn timeout_count_limit(config: &RuntimeConfig) -> i32 {
+    config.timeout_count_limit.max(1)
+}
+
+fn response_trigger_supported(config: &RuntimeConfig, trigger: TriggerEvent) -> bool {
+    let flag = match trigger {
+        TriggerEvent::Redirect => DETECT_HTTP_LOCAT,
+        TriggerEvent::SslErr => DETECT_TLS_ERR,
+        TriggerEvent::Connect => DETECT_CONNECT,
+        TriggerEvent::Torst => DETECT_TORST,
+    };
+    config
+        .groups
+        .iter()
+        .any(|group| group.detect & flag != 0)
+}
+
+#[derive(Default)]
+struct TlsRecordTracker {
+    enabled: bool,
+    disabled: bool,
+    record_pos: usize,
+    record_size: usize,
+    header: [u8; 5],
+    total_bytes: usize,
+    bytes_limit: usize,
+}
+
+impl TlsRecordTracker {
+    fn new(request: &[u8], config: &RuntimeConfig) -> Self {
+        Self {
+            enabled: ciadpi_packets::is_tls_client_hello(request) && config.partial_timeout_ms != 0,
+            disabled: false,
+            record_pos: 0,
+            record_size: 0,
+            header: [0; 5],
+            total_bytes: 0,
+            bytes_limit: config.timeout_bytes_limit.max(0) as usize,
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.enabled && !self.disabled
+    }
+
+    fn waiting_for_tls_record(&self) -> bool {
+        self.active() && self.record_pos != 0 && self.record_pos != self.record_size
+    }
+
+    fn observe(&mut self, bytes: &[u8]) {
+        if !self.active() {
+            return;
+        }
+
+        self.total_bytes += bytes.len();
+        if self.bytes_limit != 0 && self.total_bytes > self.bytes_limit {
+            self.disabled = true;
+            return;
+        }
+
+        let mut pos = 0usize;
+        while pos < bytes.len() {
+            if self.record_pos < 5 {
+                self.header[self.record_pos] = bytes[pos];
+                self.record_pos += 1;
+                pos += 1;
+                if self.record_pos < 5 {
+                    continue;
+                }
+                self.record_size =
+                    usize::from(u16::from_be_bytes([self.header[3], self.header[4]])) + 5;
+                let rec_type = self.header[0];
+                if !(0x14..=0x18).contains(&rec_type) {
+                    self.disabled = true;
+                    return;
+                }
+            }
+
+            if self.record_pos == self.record_size {
+                self.record_pos = 0;
+                self.record_size = 0;
+                continue;
+            }
+
+            let remaining = self.record_size.saturating_sub(self.record_pos);
+            if remaining == 0 {
+                self.disabled = true;
+                return;
+            }
+            let take = remaining.min(bytes.len() - pos);
+            self.record_pos += take;
+            pos += take;
+        }
     }
 }
 

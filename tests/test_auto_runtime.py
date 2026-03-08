@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import socket
 import socketserver
+import subprocess
 import threading
 import time
 import unittest
@@ -14,6 +15,7 @@ from test_proxy_integration import (
     EchoHandler,
     ProxyProcess,
     ThreadingTCPServer,
+    recv_exact,
     recv_until,
     socks_connect,
 )
@@ -118,6 +120,45 @@ class TorstHandler(socketserver.BaseRequestHandler):
             self.request.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
 
 
+class PartialTlsServer(ThreadingTCPServer):
+    def __init__(
+        self,
+        server_address,
+        handler_class,
+        *,
+        success: bytes,
+        split_at: int,
+        delay: float,
+        retry_after_timeout: bool,
+    ):
+        self.success = success
+        self.split_at = split_at
+        self.delay = delay
+        self.retry_after_timeout = retry_after_timeout
+        self.requests: list[bytes] = []
+        self._lock = threading.Lock()
+        super().__init__(server_address, handler_class)
+
+    def record(self, request: bytes) -> int:
+        with self._lock:
+            self.requests.append(request)
+            return len(self.requests)
+
+
+class PartialTlsHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        request = self.request.recv(4096)
+        attempt = self.server.record(request)
+        if self.server.retry_after_timeout and attempt > 1:
+            self.request.sendall(self.server.success)
+            return
+
+        self.request.sendall(self.server.success[: self.server.split_at])
+        time.sleep(self.server.delay)
+        if not self.server.retry_after_timeout:
+            self.request.sendall(self.server.success[self.server.split_at :])
+
+
 class AutoRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self._servers: list[socketserver.BaseServer] = []
@@ -134,6 +175,16 @@ class AutoRuntimeTests(unittest.TestCase):
         self._servers.append(server)
         self._threads.append(thread)
         return server
+
+    def _require_timeout_support(self) -> None:
+        help_text = subprocess.run(
+            [PROXY_BINARY, "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        if "-T, --timeout" not in help_text:
+            self.skipTest("binary does not expose timeout runtime support on this platform")
 
     def test_connect_trigger_reuses_cached_fallback_route_within_process(self) -> None:
         echo = self._start_server(ThreadingTCPServer(("127.0.0.1", 0), EchoHandler))
@@ -210,6 +261,62 @@ class AutoRuntimeTests(unittest.TestCase):
                 self.assertEqual(sock.recv(2), b"ok")
 
         self.assertEqual(len(server.requests), 2)
+
+    def test_partial_tls_timeout_count_limit_triggers_torst_retry(self) -> None:
+        self._require_timeout_support()
+        payload = (Path(__file__).resolve().parent / "corpus" / "packets" / "tls_client_hello.bin").read_bytes()
+        success = b"\x16\x03\x03\x00\x01\x02"
+        server = self._start_server(
+            PartialTlsServer(
+                ("127.0.0.1", 0),
+                PartialTlsHandler,
+                success=success,
+                split_at=3,
+                delay=0.18,
+                retry_after_timeout=True,
+            )
+        )
+
+        with ProxyProcess(
+            PROXY_BINARY,
+            extra_args=["--auto", "torst", "-T", "3:0.05:2:64"],
+        ) as proxy:
+            with socks_connect(proxy.port, server.server_address[1]) as sock:
+                sock.sendall(payload)
+                response = recv_exact(sock, len(success))
+
+        self.assertEqual(response, success)
+        self.assertEqual(len(server.requests), 2)
+
+    def test_timeout_bytes_limit_disables_partial_torst_retry(self) -> None:
+        self._require_timeout_support()
+        payload = (Path(__file__).resolve().parent / "corpus" / "packets" / "tls_client_hello.bin").read_bytes()
+        success = b"\x16\x03\x03\x00\x01\x02"
+        server = self._start_server(
+            PartialTlsServer(
+                ("127.0.0.1", 0),
+                PartialTlsHandler,
+                success=success,
+                split_at=5,
+                delay=0.12,
+                retry_after_timeout=False,
+            )
+        )
+
+        with ProxyProcess(
+            PROXY_BINARY,
+            extra_args=["--auto", "torst", "-T", "3:0.05:2:4"],
+        ) as proxy:
+            with socks_connect(proxy.port, server.server_address[1]) as sock:
+                sock.sendall(payload)
+                response = recv_exact(sock, len(success))
+
+        self.assertEqual(response, success)
+        self.assertEqual(
+            len(server.requests),
+            1,
+            "timeout byte limit should disable torst retry after enough response bytes arrive",
+        )
 
 
 def main() -> int:
