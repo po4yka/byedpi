@@ -8,6 +8,7 @@ CLANG ?= clang
 CARGO ?= cargo
 SAN_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined
 FUZZ_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined
+RUST_BIN := target/debug/ciadpi-rs
 
 HEADERS = conev.h desync.h error.h extend.h kavl.h mpool.h packets.h params.h proxy.h win_service.h
 SRC = packets.c main.c conev.c proxy.c desync.c mpool.c extend.c
@@ -106,10 +107,16 @@ test-contract: $(TARGET) oracles packets-corpus
 test-rust: oracles packets-corpus Cargo.toml
 	$(CARGO) test --workspace
 
+rust-bin: Cargo.toml
+	$(CARGO) build -p ciadpi-bin
+
+test-rust-binary-parity: $(TARGET) rust-bin
+	$(PYTHON) $(TEST_DIR)/test_rust_binary_parity.py --c-binary ./$(TARGET) --rust-binary ./$(RUST_BIN)
+
 bench-smoke: oracles packets-corpus Cargo.toml
 	$(CARGO) test -p ciadpi-packets benchmark_smoke -- --ignored --nocapture
 
-test: test-packets test-contract test-integration test-desync-runtime test-rust
+test: test-packets test-contract test-integration test-desync-runtime test-rust test-rust-binary-parity
 
 test-sanitize: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_SAN_BIN) $(SAN_TARGET) oracles
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PACKETS_TEST_SAN_BIN) $(PACKETS_CORPUS_DIR)
@@ -130,4 +137,4 @@ install: $(TARGET)
 	mkdir -p $(INSTALL_DIR)
 	install -m 755 $(TARGET) $(INSTALL_DIR)
 
-.PHONY: all windows clean install oracles packets-corpus test-packets test-contract test-integration test-desync-runtime test-rust bench-smoke test test-sanitize fuzz-packets
+.PHONY: all windows clean install oracles packets-corpus rust-bin test-packets test-contract test-integration test-desync-runtime test-rust test-rust-binary-parity bench-smoke test test-sanitize fuzz-packets

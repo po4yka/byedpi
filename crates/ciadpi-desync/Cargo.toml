@@ -8,3 +8,6 @@ license.workspace = true
 ciadpi-config = { path = "../ciadpi-config" }
 ciadpi-packets = { path = "../ciadpi-packets" }
 ciadpi-session = { path = "../ciadpi-session" }
+
+[dev-dependencies]
+serde_json = "1.0"

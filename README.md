@@ -16,6 +16,7 @@ make fuzz-packets
 
 - `make test` runs corpus-backed `packets.c` regressions plus black-box SOCKS/HTTP CONNECT/TLS proxy tests
 - `make test` also runs desync runtime regression checks against oracle output and Linux loopback packet-capture checks when `tcpdump` is available
+- `make test` builds `ciadpi-rs`, runs the Rust oracle-diff suites, and checks `ciadpi-rs` against `ciadpi` for `--help`, `--version`, and parse-failure CLI parity
 - `make test-sanitize` reruns those tests with AddressSanitizer and UndefinedBehaviorSanitizer
 - `make fuzz-packets` runs a standalone mutation-based fuzz smoke test over the packet corpus
 
