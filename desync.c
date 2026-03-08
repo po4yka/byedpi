@@ -100,10 +100,18 @@ static char *alloc_pktd(size_t n)
     char *p = mmap(0, n, PROT_WRITE | PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
     return p == MAP_FAILED ? 0 : p;
 }
+
+static void free_pktd(char *p, size_t n)
+{
+    if (p) {
+        munmap(p, n);
+    }
+}
 #else
 #define sock_has_notsent(sfd) 0
 
 #define alloc_pktd(n) malloc(n)
+#define free_pktd(p, n) free(p)
 #endif
 
 
@@ -566,6 +574,29 @@ int desync_plan_buffer(const char *input, size_t input_len, size_t buffer_size,
     result->tampered_len = n;
     result->step_count = step_count;
     result->info = info;
+    return 0;
+}
+
+int desync_build_fake_packet(const char *input, size_t input_len,
+        const struct desync_params *dp, unsigned int seed,
+        char *output, size_t output_size,
+        struct desync_fake_result *result)
+{
+    if (!input || !dp || !output || !result) {
+        return -1;
+    }
+    srand(seed);
+    struct proto_info info = { 0 };
+    struct packet pkt = get_tcp_fake(input, (ssize_t)input_len, &info, dp);
+    if (!pkt.data || pkt.size < 0 || (size_t)pkt.size > output_size) {
+        free_pktd(pkt.data, (size_t)(pkt.size > 0 ? pkt.size : 0));
+        return -1;
+    }
+    memcpy(output, pkt.data, (size_t)pkt.size);
+    result->fake_len = pkt.size;
+    result->fake_offset = pkt.off;
+    result->info = info;
+    free_pktd(pkt.data, (size_t)pkt.size);
     return 0;
 }
 #endif

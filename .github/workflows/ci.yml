@@ -17,6 +17,8 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux packet capture tooling
+        run: sudo apt-get update && sudo apt-get install -y tcpdump
       - name: Run Linux contract and differential suite
         run: make test
       - name: Run sanitizer suite
@@ -31,6 +33,8 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux packet capture tooling
+        run: sudo apt-get update && sudo apt-get install -y tcpdump
       - name: Run full nightly verification
         run: |
           make test

@@ -110,6 +110,19 @@ class ThreadingUDPServer(socketserver.ThreadingMixIn, socketserver.UDPServer):
     daemon_threads = True
 
 
+class RecordingUDPServer(socketserver.UDPServer):
+    allow_reuse_address = True
+
+    def __init__(self, server_address, handler_class):
+        self.packets: list[bytes] = []
+        self._lock = threading.Lock()
+        super().__init__(server_address, handler_class)
+
+    def record(self, data: bytes) -> None:
+        with self._lock:
+            self.packets.append(data)
+
+
 class EchoHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         while True:
@@ -122,6 +135,8 @@ class EchoHandler(socketserver.BaseRequestHandler):
 class UDPEchoHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         data, sock = self.request
+        if hasattr(self.server, "record"):
+            self.server.record(data)
         sock.sendto(data, self.client_address)
 
 
@@ -326,10 +341,15 @@ def udp_proxy_roundtrip(relay: tuple[str, int], dst_port: int, payload: bytes) -
     try:
         packet = b"\x00\x00\x00\x01" + socket.inet_aton("127.0.0.1") + dst_port.to_bytes(2, "big") + payload
         udp_sock.sendto(packet, relay)
-        response, _ = udp_sock.recvfrom(4096)
-        if response[:4] != b"\x00\x00\x00\x01":
-            raise AssertionError(f"unexpected UDP header: {response!r}")
-        return response[10:]
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            response, _ = udp_sock.recvfrom(4096)
+            if response[:4] != b"\x00\x00\x00\x01":
+                raise AssertionError(f"unexpected UDP header: {response!r}")
+            body = response[10:]
+            if body == payload:
+                return body
+        raise AssertionError("timed out waiting for expected UDP payload")
     finally:
         udp_sock.close()
 
@@ -436,6 +456,20 @@ class ProxyIntegrationTests(unittest.TestCase):
                     payload,
                 )
 
+    def test_udp_fake_burst_reaches_server_before_payload(self) -> None:
+        udp_server = self._start_server(RecordingUDPServer(("127.0.0.1", 0), UDPEchoHandler))
+        with ProxyProcess(PROXY_BINARY, extra_args=["--udp-fake", "2"]) as proxy:
+            control_sock, relay = socks_udp_associate(proxy.port)
+            with control_sock:
+                payload = b"udp payload after fakes"
+                echoed = udp_proxy_roundtrip(relay, udp_server.server_address[1], payload)
+                self.assertEqual(echoed, payload)
+
+        self.assertGreaterEqual(len(udp_server.packets), 3)
+        self.assertEqual(udp_server.packets[-1], payload)
+        self.assertEqual(udp_server.packets[0], b"\x00" * 64)
+        self.assertEqual(udp_server.packets[1], b"\x00" * 64)
+
     def test_connection_churn_echo(self) -> None:
         echo_server = self._start_server(ThreadingTCPServer(("127.0.0.1", 0), EchoHandler))
         with ProxyProcess(PROXY_BINARY) as proxy:
@@ -459,6 +493,24 @@ class ProxyIntegrationTests(unittest.TestCase):
                 sock.sendall(request)
                 reply = recv_socks5_reply(sock)
                 self.assertNotEqual(parse_socks5_reply(reply)[0], 0)
+
+    def test_connect_failure_does_not_yield_a_working_tunnel(self) -> None:
+        closed_port = free_port()
+        with ProxyProcess(PROXY_BINARY) as proxy:
+            sock = socks_auth(proxy.port)
+            with sock:
+                request = b"\x05\x01\x00\x01" + socket.inet_aton("127.0.0.1") + closed_port.to_bytes(2, "big")
+                sock.sendall(request)
+                reply = recv_socks5_reply(sock)
+                if parse_socks5_reply(reply)[0] != 0:
+                    return
+                sock.settimeout(1)
+                try:
+                    sock.sendall(b"closed-port-probe")
+                    data = sock.recv(1024)
+                except (BrokenPipeError, OSError, TimeoutError):
+                    return
+                self.assertEqual(data, b"")
 
     def test_external_socks_chain(self) -> None:
         echo_server = self._start_server(ThreadingTCPServer(("127.0.0.1", 0), EchoHandler))

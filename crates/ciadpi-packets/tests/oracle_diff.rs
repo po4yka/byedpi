@@ -4,7 +4,8 @@ use std::process::Command;
 
 use ciadpi_packets::{
     change_tls_sni_seeded_like_c, is_http_redirect, mod_http_like_c, parse_http, parse_tls,
-    part_tls_like_c, randomize_tls_seeded_like_c, tls_session_id_mismatch, MH_HMIX, MH_SPACE,
+    part_tls_like_c, randomize_tls_seeded_like_c, tls_session_id_mismatch, MH_DMIX, MH_HMIX,
+    MH_SPACE,
 };
 use serde_json::Value;
 
@@ -149,11 +150,38 @@ fn change_tls_sni_matches_oracle() {
 }
 
 #[test]
+fn change_tls_sni_shrink_matches_oracle() {
+    let path = corpus_path("tls_client_hello_ech.bin");
+    let data = read_corpus("tls_client_hello_ech.bin");
+    let oracle = run_oracle(&[
+        "change_tls_sni",
+        path_arg(&path),
+        "a.docs.example.test",
+        &data.len().to_string(),
+    ]);
+    let rust = change_tls_sni_seeded_like_c(&data, b"a.docs.example.test", data.len(), 1);
+
+    assert_eq!(rust.rc, oracle["rc"].as_i64().unwrap() as isize);
+    assert_eq!(hex(&rust.bytes), oracle["hex"].as_str().unwrap());
+}
+
+#[test]
 fn randomize_tls_matches_deterministic_oracle() {
     let path = corpus_path("tls_client_hello.bin");
     let oracle = run_oracle(&["randomize_tls_seeded", path_arg(&path), "7"]);
     let data = read_corpus("tls_client_hello.bin");
     let rust = randomize_tls_seeded_like_c(&data, 7);
+
+    assert_eq!(rust.rc, oracle["rc"].as_i64().unwrap() as isize);
+    assert_eq!(hex(&rust.bytes), oracle["hex"].as_str().unwrap());
+}
+
+#[test]
+fn mod_http_dmix_matches_oracle() {
+    let path = corpus_path("http_request.bin");
+    let oracle = run_oracle(&["mod_http", path_arg(&path), "7"]);
+    let data = read_corpus("http_request.bin");
+    let rust = mod_http_like_c(&data, MH_HMIX | MH_SPACE | MH_DMIX);
 
     assert_eq!(rust.rc, oracle["rc"].as_i64().unwrap() as isize);
     assert_eq!(hex(&rust.bytes), oracle["hex"].as_str().unwrap());

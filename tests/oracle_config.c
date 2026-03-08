@@ -53,12 +53,14 @@ static void print_group_json(const struct desync_params *dp)
 {
     printf("{\"id\":%d,\"detect\":%d,\"proto\":%d,\"ttl\":%d,"
             "\"md5sig\":%s,\"udp_fake_count\":%d,\"fake_mod\":%d,"
-            "\"fake_tls_size\":%d,\"drop_sack\":%s,\"mod_http\":%d,"
+            "\"fake_tls_size\":%d,\"fake_data_size\":%zd,"
+            "\"drop_sack\":%s,\"mod_http\":%d,"
             "\"tlsminor\":%u,\"tlsminor_set\":%s,\"cache_ttl\":%ld,"
             "\"cache_file\":",
         dp->id, dp->detect, dp->proto, dp->ttl,
         dp->md5sig ? "true" : "false", dp->udp_fake_count, dp->fake_mod,
-        dp->fake_tls_size, dp->drop_sack ? "true" : "false",
+        dp->fake_tls_size, dp->fake_data.size,
+        dp->drop_sack ? "true" : "false",
         dp->mod_http, (unsigned)dp->tlsminor,
         dp->tlsminor_set ? "true" : "false", dp->cache_ttl);
     if (dp->cache_file) {
@@ -74,8 +76,22 @@ static void print_group_json(const struct desync_params *dp)
     print_part_array(dp->parts, dp->parts_n);
     fputs(",\"tlsrec\":", stdout);
     print_part_array(dp->tlsrec, dp->tlsrec_n);
+    fputs(",\"fake_offset\":", stdout);
+    if (dp->fake_offset.m) {
+        printf("{\"mode\":%d,\"flag\":%d,\"pos\":%ld,\"r\":%d,\"s\":%d}",
+            dp->fake_offset.m, dp->fake_offset.flag, dp->fake_offset.pos,
+            dp->fake_offset.r, dp->fake_offset.s);
+    } else {
+        fputs("null", stdout);
+    }
     fputs(",\"fake_sni_list\":", stdout);
     print_string_array(dp->fake_sni_list, dp->fake_sni_count);
+    fputs(",\"oob_data\":", stdout);
+    if (dp->oob_char[1]) {
+        oracle_print_json_string(stdout, dp->oob_char, 1);
+    } else {
+        fputs("null", stdout);
+    }
     fputs(",\"ext_socks\":", stdout);
     oracle_print_addr_json(stdout, &dp->ext_socks);
     putchar('}');

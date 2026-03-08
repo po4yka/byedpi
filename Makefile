@@ -97,6 +97,9 @@ test-packets: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_BIN)
 test-integration: $(TARGET)
 	$(PYTHON) $(TEST_DIR)/test_proxy_integration.py --binary ./$(TARGET)
 
+test-desync-runtime: $(TARGET) oracles packets-corpus
+	$(PYTHON) $(TEST_DIR)/test_desync_runtime.py --binary ./$(TARGET) --bin-dir ./$(TEST_BIN_DIR) --project-root .
+
 test-contract: $(TARGET) oracles packets-corpus
 	$(PYTHON) $(TEST_DIR)/test_contract.py --binary ./$(TARGET) --bin-dir ./$(TEST_BIN_DIR) --project-root .
 
@@ -106,11 +109,12 @@ test-rust: oracles packets-corpus Cargo.toml
 bench-smoke: oracles packets-corpus Cargo.toml
 	$(CARGO) test -p ciadpi-packets benchmark_smoke -- --ignored --nocapture
 
-test: test-packets test-contract test-integration test-rust
+test: test-packets test-contract test-integration test-desync-runtime test-rust
 
 test-sanitize: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_SAN_BIN) $(SAN_TARGET) oracles
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PACKETS_TEST_SAN_BIN) $(PACKETS_CORPUS_DIR)
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PYTHON) $(TEST_DIR)/test_proxy_integration.py --binary ./$(SAN_TARGET)
+	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PYTHON) $(TEST_DIR)/test_desync_runtime.py --binary ./$(SAN_TARGET) --bin-dir ./$(TEST_BIN_DIR) --project-root .
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PYTHON) $(TEST_DIR)/test_contract.py --binary ./$(SAN_TARGET) --bin-dir ./$(TEST_BIN_DIR) --project-root .
 
 fuzz-packets: $(PACKETS_CORPUS_STAMP) $(FUZZ_PACKETS_BIN)
@@ -126,4 +130,4 @@ install: $(TARGET)
 	mkdir -p $(INSTALL_DIR)
 	install -m 755 $(TARGET) $(INSTALL_DIR)
 
-.PHONY: all windows clean install oracles packets-corpus test-packets test-contract test-integration test-rust bench-smoke test test-sanitize fuzz-packets
+.PHONY: all windows clean install oracles packets-corpus test-packets test-contract test-integration test-desync-runtime test-rust bench-smoke test test-sanitize fuzz-packets

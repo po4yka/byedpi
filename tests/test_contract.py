@@ -16,6 +16,7 @@ from pathlib import Path
 PROXY_BINARY = ""
 BIN_DIR = Path()
 PROJECT_ROOT = Path()
+HAS_FAKE_SUPPORT = sys.platform.startswith("linux") or sys.platform == "win32"
 
 
 def run_command(
@@ -63,6 +64,14 @@ def packets_corpus(name: str) -> str:
 
 def config_corpus(name: str) -> str:
     return str(PROJECT_ROOT / "tests" / "corpus" / "config" / name)
+
+
+def binary_temp_file(data: bytes) -> tempfile.NamedTemporaryFile:
+    tmp = tempfile.NamedTemporaryFile(prefix="ciadpi-oracle-", suffix=".bin", delete=False)
+    tmp.write(data)
+    tmp.flush()
+    tmp.close()
+    return tmp
 
 
 class CliContractTests(unittest.TestCase):
@@ -166,6 +175,94 @@ class ConfigOracleTests(unittest.TestCase):
         self.assertEqual(group["cache_ttl"], 60)
         self.assertEqual(group["cache_file"], "-")
 
+    def test_parse_args_with_extended_desync_flags(self) -> None:
+        data = run_json_command(
+            [
+                oracle("oracle_config"),
+                "parse_args",
+                "--http-connect",
+                "--ip",
+                "127.0.0.1",
+                "--port",
+                "2080",
+                "--conn-ip",
+                "127.0.0.1",
+                "--max-conn",
+                "33",
+                "--buf-size",
+                "8192",
+                "--proto",
+                "t,h,u,i",
+                "--pf",
+                "80-90",
+                "--round",
+                "2-4",
+                "--ttl",
+                "3",
+                "--fake-offset",
+                "1+s",
+                "--fake-tls-mod",
+                "rand,orig,m=128",
+                "--fake-data",
+                ":GET / HTTP/1.1\r\nHost: fake.example.test\r\n\r\n",
+                "--oob-data",
+                "Z",
+                "--mod-http",
+                "h,d,r",
+                "--tlsminor",
+                "5",
+                "--udp-fake",
+                "2",
+            ]
+        )
+        self.assertEqual(data["listen_ip"], "127.0.0.1")
+        self.assertEqual(data["listen_port"], 2080)
+        self.assertEqual(data["bind_ip"], "127.0.0.1")
+        self.assertEqual(data["max_open"], 33)
+        self.assertEqual(data["bfsize"], 8192)
+        self.assertTrue(data["http_connect"])
+        group = data["groups"][0]
+        self.assertEqual(group["proto"], 31)
+        self.assertEqual(group["pf"], [80, 90])
+        self.assertEqual(group["rounds"], [2, 4])
+        self.assertEqual(group["ttl"], 3)
+        self.assertEqual(group["fake_mod"], 3)
+        self.assertEqual(group["fake_tls_size"], 128)
+        self.assertGreater(group["fake_data_size"], 0)
+        self.assertEqual(group["fake_offset"]["pos"], 1)
+        self.assertEqual(group["fake_offset"]["flag"], 8)
+        self.assertEqual(group["fake_sni_list"], [])
+        self.assertEqual(group["oob_data"], "Z")
+        self.assertEqual(group["mod_http"], 7)
+        self.assertEqual(group["tlsminor"], 5)
+        self.assertTrue(group["tlsminor_set"])
+        self.assertEqual(group["udp_fake_count"], 2)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "md5sig/drop-sack/fake-sni are Linux-gated here")
+    def test_parse_args_with_linux_fake_flags(self) -> None:
+        data = run_json_command(
+            [
+                oracle("oracle_config"),
+                "parse_args",
+                "--md5sig",
+                "--fake-sni",
+                "docs.example.test",
+                "--fake-sni",
+                "static.example.test",
+                "--drop-sack",
+            ]
+        )
+        group = data["groups"][0]
+        self.assertTrue(group["md5sig"])
+        self.assertTrue(group["drop_sack"])
+        self.assertEqual(group["fake_sni_list"], ["docs.example.test", "static.example.test"])
+
+    def test_parse_args_invalid_value_fails(self) -> None:
+        proc = run_command([oracle("oracle_config"), "parse_args", "--ttl", "999"])
+        self.assertNotEqual(proc.returncode, 0)
+        data = json.loads(proc.stdout)
+        self.assertFalse(data["ok"])
+
 
 class ProtocolOracleTests(unittest.TestCase):
     def _temp_request(self, payload: bytes) -> str:
@@ -209,8 +306,38 @@ class ProtocolOracleTests(unittest.TestCase):
         self.assertEqual(data["addr"]["addr"], "127.0.0.1")
         self.assertEqual(data["addr"]["port"], 8443)
 
+    def test_socks4a_domain_parser(self) -> None:
+        payload = b"\x04\x01" + (8081).to_bytes(2, "big") + b"\x00\x00\x00\x01" + b"user\x00localhost\x00"
+        data = run_json_command([oracle("oracle_protocol"), "socks4", self._temp_request(payload)])
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["addr"]["port"], 8081)
+
+    def test_socks5_domain_and_ipv6_parser(self) -> None:
+        domain = b"localhost"
+        domain_payload = b"\x05\x01\x00\x03" + bytes([len(domain)]) + domain + (443).to_bytes(2, "big")
+        ipv6_payload = b"\x05\x01\x00\x04" + socket.inet_pton(socket.AF_INET6, "::1") + (9443).to_bytes(2, "big")
+
+        domain_data = run_json_command([oracle("oracle_protocol"), "socks5", self._temp_request(domain_payload)])
+        ipv6_data = run_json_command([oracle("oracle_protocol"), "socks5", self._temp_request(ipv6_payload)])
+
+        self.assertTrue(domain_data["ok"])
+        self.assertEqual(domain_data["addr"]["port"], 443)
+        self.assertTrue(ipv6_data["ok"])
+        self.assertEqual(ipv6_data["addr"]["family"], "ipv6")
+        self.assertEqual(ipv6_data["addr"]["addr"], "::1")
+        self.assertEqual(ipv6_data["addr"]["port"], 9443)
+
+    def test_protocol_parser_rejects_invalid_socks5_request(self) -> None:
+        data = run_json_command([oracle("oracle_protocol"), "socks5", self._temp_request(b"\x05\x01\x00")])
+        self.assertFalse(data["ok"])
+
 
 class DesyncOracleTests(unittest.TestCase):
+    def parse_packet_oracle(self, command: str, payload: bytes, *args: str) -> dict[str, object]:
+        tmp = binary_temp_file(payload)
+        self.addCleanup(Path(tmp.name).unlink, missing_ok=True)
+        return run_json_command([oracle("oracle_packets"), command, tmp.name, *args])
+
     def test_http_mod_and_split_plan(self) -> None:
         data = run_json_command(
             [
@@ -242,6 +369,117 @@ class DesyncOracleTests(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["tampered_len"], original_len + 5)
         self.assertEqual(data["proto_type"], 0)
+
+    def test_tlsminor_mutation_plan(self) -> None:
+        data = run_json_command(
+            [
+                oracle("oracle_desync"),
+                "plan",
+                packets_corpus("tls_client_hello.bin"),
+                "7",
+                "--tlsminor",
+                "5",
+            ]
+        )
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["tampered_hex"].startswith("160305"))
+
+    def test_host_offset_plans_for_http_and_tls(self) -> None:
+        http_plan = run_json_command(
+            [
+                oracle("oracle_desync"),
+                "plan",
+                packets_corpus("http_request.bin"),
+                "7",
+                "--split",
+                "0+h",
+            ]
+        )
+        tls_plan = run_json_command(
+            [
+                oracle("oracle_desync"),
+                "plan",
+                packets_corpus("tls_client_hello.bin"),
+                "7",
+                "--split",
+                "0+s",
+            ]
+        )
+
+        self.assertTrue(http_plan["ok"])
+        self.assertEqual(http_plan["steps"][0]["end"], http_plan["host_pos"])
+        self.assertTrue(tls_plan["ok"])
+        self.assertEqual(tls_plan["steps"][0]["end"], tls_plan["host_pos"])
+
+    def test_desync_modes_are_planned_distinctly(self) -> None:
+        expected = {
+            "--split": 1,
+            "--disorder": 2,
+            "--oob": 3,
+            "--disoob": 4,
+        }
+        if HAS_FAKE_SUPPORT:
+            expected["-f"] = 5
+        for flag, mode in expected.items():
+            with self.subTest(flag=flag):
+                data = run_json_command(
+                    [
+                        oracle("oracle_desync"),
+                        "plan",
+                        packets_corpus("http_request.bin"),
+                        "7",
+                        flag,
+                        "8",
+                    ]
+                )
+                self.assertTrue(data["ok"])
+                self.assertEqual(data["steps"][0]["mode"], mode)
+                self.assertEqual(data["steps"][0]["end"], 8)
+
+    @unittest.skipUnless(HAS_FAKE_SUPPORT, "fake packet builder requires FAKE_SUPPORT")
+    def test_fake_packet_can_rewrite_tls_sni(self) -> None:
+        data = run_json_command(
+            [
+                oracle("oracle_desync"),
+                "fake",
+                packets_corpus("tls_client_hello.bin"),
+                "7",
+                "-f",
+                "-1",
+                "--fake-sni",
+                "docs.example.test",
+                "--fake-tls-mod",
+                "orig",
+            ]
+        )
+        self.assertTrue(data["ok"])
+        fake_bytes = bytes.fromhex(data["fake_hex"])
+        parsed = self.parse_packet_oracle("parse_tls", fake_bytes)
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["host"], "docs.example.test")
+
+    @unittest.skipUnless(HAS_FAKE_SUPPORT, "fake packet builder requires FAKE_SUPPORT")
+    def test_fake_packet_can_use_custom_http_payload(self) -> None:
+        data = run_json_command(
+            [
+                oracle("oracle_desync"),
+                "fake",
+                packets_corpus("http_request.bin"),
+                "7",
+                "-f",
+                "-1",
+                "--fake-data",
+                ":GET / HTTP/1.1\r\nHost: fake.example.test\r\n\r\n",
+                "--fake-offset",
+                "1+h",
+            ]
+        )
+        self.assertTrue(data["ok"])
+        self.assertGreaterEqual(data["fake_offset"], 1)
+        fake_bytes = bytes.fromhex(data["fake_hex"])
+        parsed = self.parse_packet_oracle("parse_http", fake_bytes)
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["host"], "fake.example.test")
 
 
 def main() -> int:

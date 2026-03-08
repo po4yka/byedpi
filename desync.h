@@ -43,10 +43,21 @@ struct desync_plan_result {
     struct proto_info info;
 };
 
+struct desync_fake_result {
+    ssize_t fake_len;
+    ssize_t fake_offset;
+    struct proto_info info;
+};
+
 int desync_plan_buffer(const char *input, size_t input_len, size_t buffer_size,
         const struct desync_params *dp, unsigned int seed, char *output,
         struct desync_plan_step *steps, size_t steps_cap,
         struct desync_plan_result *result);
+
+int desync_build_fake_packet(const char *input, size_t input_len,
+        const struct desync_params *dp, unsigned int seed,
+        char *output, size_t output_size,
+        struct desync_fake_result *result);
 #endif
 
 static long gen_offset(long pos, int flag,
