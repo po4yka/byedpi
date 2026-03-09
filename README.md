@@ -14,7 +14,7 @@ make transition-safety-gates
 make fuzz-packets
 ```
 
-- `make test` runs corpus-backed `packets.c` regressions plus black-box SOCKS/HTTP CONNECT/TLS proxy tests
+- `make test` runs Rust-owned `ciadpi-packets` packet regressions/exercise coverage plus black-box SOCKS/HTTP CONNECT/TLS proxy tests
 - `make test` also runs runtime parity checks for AUTO/cache promotion and reuse, cache-backed connect fallback, `redirect`, `ssl_err`, and `torst` replay behavior, plus partial-TLS timeout count and byte-limit handling
 - `make test` also runs Linux socket-feature tests for `--transparent` and `--protect-path` when the required namespace and packet-filter tooling is available
 - `make test` builds the Rust `ciadpi` artifact and runs the Rust-owned workspace/unit coverage (`cargo test --workspace --lib --bins`, the committed-fixture `oracle_diff` integrations, `ciadpi-bin` CLI integration, and desync action planning) without compiling hidden C oracle helpers
@@ -27,26 +27,27 @@ make fuzz-packets
 - `make cutover-gates` runs the Rust-owned default gates: `make test`, `make test-install-cutover`, and the packet benchmark smoke gate required for the Linux cutover
 - `make transition-runtime-gates` now runs only the explicit Rust-owned Linux runtime transition gates (`test-desync-runtime` and `test-linux-routed-runtime`)
 - `make transition-safety-gates` replaces the retired legacy C sanitizer lane with Rust-owned safety coverage for packet parsing (`cargo test -p ciadpi-packets`), proxy integration, and desync runtime smoke
-- `make fuzz-packets` runs a standalone mutation-based fuzz smoke test over the packet corpus
+- `make fuzz-packets` now runs a Rust-owned packet-corpus mutation smoke via `crates/ciadpi-packets/tests/packet_fuzz_smoke.rs`
 
 ### Ralph Loop Migration
 ```
 scripts/ralph-rust-migration doctor
 scripts/ralph-rust-migration preflight
 scripts/ralph-rust-migration list
-scripts/ralph-rust-migration dry-run full
 scripts/ralph-rust-migration start full
+scripts/ralph-rust-migration relaunch <run-id> --max-iterations 36
 ```
 
-- Repo-local Ralph loop infrastructure for the remaining migration backlog lives under `tools/ralph-loop/`
+- Repo-local Ralph loop infrastructure and archived migration records live under `tools/ralph-loop/`
 - The repo root now contains `ralph.yml` and `PROMPT.md`, so upstream `ralph` commands also work directly from this checkout
-- `scripts/ralph-rust-migration` defaults to the `codex` backend, `builtin:feature`, and manual merge mode for the remaining migration tasks
+- `scripts/ralph-rust-migration` defaults to the `codex` backend, `builtin:feature`, and manual merge mode for migration closeout tasks
 - The installed Ralph 2.7.0 CLI on this machine has a fixed 14400-second runtime cap, so the intended operating mode is one verified relaunchable slice per loop
-- Completed phase specs for the runtime-policy, daemon/pidfile/TFO, delayed-connect/cache-stdout, connection-limit/Shadowsocks, and staged-send/timeout work are kept under `tools/ralph-loop/tasks/` as archived migration records
-- The byedpi Rust migration backlog is now archived; phase 7 (`windows-runtime-port`) and phase 8 (`rust-only-final-cutover`) are retained under `tools/ralph-loop/tasks/` as closeout records
+- Phase 9 (`packet-fixture/tooling-rustification`) is complete: `make test-packets` runs Rust-owned `packet_regression` / `packet_exercise`, `make fuzz-packets` runs Rust-owned `packet_fuzz_smoke`, and the residual packet C helpers have been retired
+- Completed phase specs for the runtime-policy, daemon/pidfile/TFO, delayed-connect/cache-stdout, connection-limit/Shadowsocks, staged-send/timeout work, Windows runtime port, Rust-only final cutover, and packet-fixture/tooling Rustification are kept under `tools/ralph-loop/tasks/` as archived migration records
+- The active manifest no longer contains unfinished packet/tooling migration phases; `scripts/ralph-rust-migration list` now acts as a completion check unless a new backlog row is added later
 - The final explicit gate layout is Rust-owned: `make transition-runtime-gates` keeps the heavy Linux runtime suites explicit, while `make transition-safety-gates` provides the Rust-owned packet/proxy/desync safety smoke
 - `test-desync-runtime` and `test-linux-routed-runtime` both remain explicit Rust-owned Linux runtime gates for now because they are heavier and environment-sensitive, not because they still depend on hidden C; inside `test-linux-routed-runtime`, the `md5sig` case is guarded by an explicit `TCP_MD5SIG` capability probe instead of a generic environment skip
-- The dead C oracle helpers, the old Windows C service helper, and the unreferenced root-level legacy C runtime sources have been retired; the residual C surface is now limited to the packet-fixture/tooling files that still back `tests/test_packets.c`, `make fuzz-packets`, and the packet corpus tooling
+- The dead C oracle helpers, the old Windows C service helper, the residual packet-fixture/tooling helpers, and the unreferenced root-level legacy C runtime sources have been retired; the supported verification/tooling surface is now Rust-owned
 - The retired closeout aliases (`make test-transition-oracles`, `make transition-oracle-gates`, `make test-sanitize`, and `make transition-c-sanitize-gates`) have been removed; the supported explicit gate names are now only `make test-transition-runtime`, `make transition-runtime-gates`, and `make transition-safety-gates`
 - Task specs, prompts, and launch details are documented in `tools/ralph-loop/README.md`
 

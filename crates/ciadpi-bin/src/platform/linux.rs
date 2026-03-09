@@ -490,7 +490,6 @@ fn tcp_has_notsent(fd: libc::c_int) -> io::Result<bool> {
     Ok(info.tcpi_notsent_bytes != 0)
 }
 
-
 fn wait_tcp_stage_fd(fd: libc::c_int, wait_send: bool, await_interval: Duration) -> io::Result<()> {
     let sleep_for = if await_interval.is_zero() {
         Duration::from_millis(1)

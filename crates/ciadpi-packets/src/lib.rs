@@ -290,19 +290,20 @@ fn remove_ks_group(buffer: &mut [u8], n: usize, skip: usize, group: u16) -> usiz
     if ks_offs + 4 + ks_size > n {
         return 0;
     }
+    let ks_end = ks_offs + 4 + ks_size;
     let mut group_offs = ks_offs + 6;
-    while group_offs + 4 < ks_offs + 4 + ks_size {
+    while group_offs + 4 < ks_end {
         let Some(group_size) = read_u16(buffer, group_offs + 2) else {
             return 0;
         };
-        if ks_offs + 4 + group_size > n {
+        let group_end = group_offs + 4 + group_size;
+        if group_end > ks_end || group_end > n {
             return 0;
         }
         let Some(group_type) = read_u16(buffer, group_offs).map(|value| value as u16) else {
             return 0;
         };
         if group_type == group {
-            let group_end = group_offs + 4 + group_size;
             buffer.copy_within(group_end..n, group_offs);
             let new_size = ks_size.saturating_sub(4 + group_size);
             let _ = write_u16(buffer, ks_offs + 2, new_size);
@@ -355,7 +356,8 @@ fn resize_ech_ext(buffer: &mut [u8], n: usize, skip: usize, mut inc: isize) -> i
         return 0;
     }
     let dest = ech_end + inc;
-    if dest < 0 || dest as usize > buffer.len() {
+    let tail_len = n.saturating_sub(ech_end as usize);
+    if dest < 0 || dest as usize > buffer.len().saturating_sub(tail_len) {
         return 0;
     }
     let _ = write_u16(buffer, ech_offs + 2, (ech_size + inc) as usize);
@@ -373,8 +375,12 @@ fn resize_sni(
 ) -> bool {
     let delta = new_size as isize - (sni_size as isize - 5);
     let sni_end = sni_offs + 4 + sni_size;
+    if sni_end > n {
+        return false;
+    }
     let dest = sni_end as isize + delta;
-    if dest < 0 || dest as usize > buffer.len() {
+    let tail_len = n.saturating_sub(sni_end);
+    if dest < 0 || dest as usize > buffer.len().saturating_sub(tail_len) {
         return false;
     }
     if !write_u16(buffer, sni_offs + 2, new_size + 5)
@@ -649,21 +655,23 @@ pub fn randomize_tls_seeded_like_c(input: &[u8], seed: u32) -> PacketMutation {
             bytes: output,
         };
     }
+    let ks_end = ks_offs + 4 + ks_size;
     let mut group_offs = ks_offs + 6;
-    while group_offs + 4 < ks_offs + 4 + ks_size {
+    while group_offs + 4 < ks_end {
         let Some(group_size) = read_u16(&output, group_offs + 2) else {
             return PacketMutation {
                 rc: 0,
                 bytes: output,
             };
         };
-        if ks_offs + 4 + group_size > output.len() {
+        let group_end = group_offs + 4 + group_size;
+        if group_end > ks_end || group_end > output.len() {
             return PacketMutation {
                 rc: 0,
                 bytes: output,
             };
         }
-        for byte in &mut output[group_offs + 4..group_offs + 4 + group_size] {
+        for byte in &mut output[group_offs + 4..group_end] {
             *byte = rng.next_u8();
         }
         group_offs += 4 + group_size;
@@ -828,6 +836,12 @@ pub fn change_tls_sni_seeded_like_c(
     }
 
     let out_len = (5 + record_size) as usize;
+    if out_len > output.len() {
+        return PacketMutation {
+            rc: -1,
+            bytes: input.to_vec(),
+        };
+    }
     PacketMutation {
         rc: 0,
         bytes: output[..out_len].to_vec(),

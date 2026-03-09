@@ -11,8 +11,8 @@ This file freezes the current Linux-facing contract before the Rust cutover.
 | Filters | hosts suffix matching, ipset CIDR matching | `crates/ciadpi-config/tests/oracle_diff.rs` via `tests/corpus/rust-fixtures/config_oracle.json` |
 | Cache format | dump/load round-trip | `crates/ciadpi-config/tests/oracle_diff.rs`, `tests/corpus/rust-fixtures/config_oracle.json` |
 | Protocol parsing | SOCKS4, SOCKS4a domain, SOCKS5 connect, SOCKS5 domain, SOCKS5 IPv6, SOCKS5 UDP associate, HTTP CONNECT, invalid requests | `crates/ciadpi-session/tests/oracle_diff.rs` via `tests/corpus/rust-fixtures/session_oracle.json` |
-| Packets | HTTP/TLS parsing, redirects, TLS SID mismatch | `tests/test_packets.c`, `crates/ciadpi-packets/tests/oracle_diff.rs` via `tests/corpus/rust-fixtures/packets_oracle.json` |
-| Packet mutations | HTTP header mutation, TLS split, TLS SNI rewrite (grow and shrink), deterministic TLS randomization | `tests/test_packets.c`, `crates/ciadpi-packets/tests/oracle_diff.rs` via `tests/corpus/rust-fixtures/packets_oracle.json` |
+| Packets | HTTP/TLS parsing, redirects, TLS SID mismatch | `crates/ciadpi-packets/tests/packet_regression.rs`, `crates/ciadpi-packets/tests/oracle_diff.rs` via `tests/corpus/rust-fixtures/packets_oracle.json` |
+| Packet mutations | HTTP header mutation, TLS split, TLS SNI rewrite (grow and shrink), deterministic TLS randomization, no-panic corpus exercise | `crates/ciadpi-packets/tests/packet_regression.rs`, `crates/ciadpi-packets/tests/packet_exercise.rs`, `crates/ciadpi-packets/tests/oracle_diff.rs` via `tests/corpus/rust-fixtures/packets_oracle.json` |
 | Desync planning | deterministic split/mod-http/tlsrec/tlsminor planning, host/SNI offsets, split/disorder/oob/disoob mode selection | `crates/ciadpi-desync/tests/oracle_diff.rs` via `tests/corpus/rust-fixtures/desync_oracle.json` |
 | Desync fake generation | deterministic fake packet builder for custom HTTP payloads and TLS SNI rewrites on `FAKE_SUPPORT` platforms | `crates/ciadpi-desync/tests/oracle_diff.rs` via `tests/corpus/rust-fixtures/desync_oracle.json` |
 | Desync runtime | stream-visible `mod-http`, `tlsrec`, `tlsminor`, `oob`, and staged `--wait-send` behavior matches the committed Rust-owned desync fixtures and preserves upstream payload contracts | `tests/test_desync_runtime.py::DesyncRuntimeTests`, `tests/corpus/rust-fixtures/desync_oracle.json` |
@@ -31,7 +31,7 @@ This file freezes the current Linux-facing contract before the Rust cutover.
 | Windows service/runtime parity | `make test-windows-cross-check` compiles Windows-only Rust tests for `x86_64-pc-windows-gnu`, covering the `ByeDPI` service name, stop/shutdown/interrogate control handling, saved CLI argument reuse, executable-directory working-directory reset, and runner exit-code propagation; native host execution is documented in the phase-7 run spec | `make test-windows-cross-check`, `crates/ciadpi-bin/src/platform/windows.rs`, `.github/workflows/ci.yml`, `.ralph/specs/20260309T030547Z-codex-remaining-full-migration-22a588/phase-7-native-windows-validation.md` |
 | Proxy behavior | SOCKS4, SOCKS5, HTTP CONNECT, UDP associate, TLS tunneling, external SOCKS chaining, upstream connect failure handling, IPv6, `--no-domain`, `--no-udp`, `--udp-fake` bursts | `tests/test_proxy_integration.py` |
 | Stress | connection churn over repeated proxied SOCKS5 sessions | `tests/test_proxy_integration.py::ProxyIntegrationTests.test_connection_churn_echo` |
-| Safety | Rust-owned packet parser/property coverage plus proxy integration and desync runtime smoke; packet fuzz smoke | `make transition-safety-gates`, `make fuzz-packets`, `crates/ciadpi-packets/src/lib.rs` |
+| Safety | Rust-owned packet parser/property coverage plus proxy integration, desync runtime smoke, and packet-corpus mutation smoke | `make transition-safety-gates`, `make fuzz-packets`, `crates/ciadpi-packets/src/lib.rs`, `crates/ciadpi-packets/tests/packet_fuzz_smoke.rs` |
 | Performance smoke | packet hot-path benchmark smoke | `make bench-smoke`, `crates/ciadpi-packets/tests/benchmark_smoke.rs` |
 
 ## Gate Ownership
@@ -43,5 +43,5 @@ This file freezes the current Linux-facing contract before the Rust cutover.
 
 - Promotion thresholds for churn and benchmark regressions now that the Rust binary is the active Linux runtime path.
 - Keep `test-desync-runtime` and `test-linux-routed-runtime` explicit unless a separate gate-promotion slice accepts their live-runtime and environment-sensitive cost in the default path.
-- Preserve the documented residual C packet-fixture/tooling surface unless and until a separate non-migration cleanup replaces those verification assets.
+- Phase 9 (`packet-fixture/tooling-rustification`) is complete. `make test-packets` and `make fuzz-packets` are both Rust-owned via `ciadpi-packets`, and the residual packet C helper surface has been retired.
 - Execute the documented native Windows validation procedure in `.ralph/specs/20260309T030547Z-codex-remaining-full-migration-22a588/phase-7-native-windows-validation.md` and archive the resulting evidence as a post-closeout operational record.
