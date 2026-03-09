@@ -1,6 +1,5 @@
 use std::io;
 use std::net::{SocketAddr, TcpStream};
-use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -19,12 +18,12 @@ pub fn detect_default_ttl() -> io::Result<u8> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn enable_tcp_fastopen_connect<T: AsRawFd>(socket: &T) -> io::Result<()> {
+pub fn enable_tcp_fastopen_connect<T: std::os::fd::AsRawFd>(socket: &T) -> io::Result<()> {
     linux::enable_tcp_fastopen_connect(socket)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn enable_tcp_fastopen_connect<T: AsRawFd>(_socket: &T) -> io::Result<()> {
+pub fn enable_tcp_fastopen_connect<T>(_socket: &T) -> io::Result<()> {
     stub::enable_tcp_fastopen_connect()
 }
 
@@ -39,12 +38,12 @@ pub fn set_tcp_md5sig(stream: &TcpStream, key_len: u16) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn protect_socket<T: AsRawFd>(socket: &T, path: &str) -> io::Result<()> {
+pub fn protect_socket<T: std::os::fd::AsRawFd>(socket: &T, path: &str) -> io::Result<()> {
     linux::protect_socket(socket, path)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn protect_socket<T: AsRawFd>(socket: &T, path: &str) -> io::Result<()> {
+pub fn protect_socket<T>(socket: &T, path: &str) -> io::Result<()> {
     stub::protect_socket(socket, path)
 }
 

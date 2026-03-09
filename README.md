@@ -19,11 +19,13 @@ make fuzz-packets
 - `make test` also runs desync runtime regression checks against oracle output and Linux loopback packet-capture checks for staged send and `--wait-send` / `--await-int` behavior when `tcpdump` is available
 - `make test` also runs Linux routed namespace tests for `fake`, `md5sig`, and `drop-sack` when `ip netns` and passwordless `sudo` are available
 - `make test` also runs Linux socket-feature tests for `--transparent` and `--protect-path` when the required namespace and packet-filter tooling is available
-- `make test` builds `ciadpi-rs`, runs the Rust oracle-diff suites, and checks `ciadpi-rs` against `ciadpi` for `--help`, `--version`, and parse-failure CLI parity
-- `make test` also runs the desync runtime, auto-trigger parity, and Linux routed namespace suites against `ciadpi-rs`, so stream-visible tampering and routed fake-path behavior stay gated on the Rust binary too
-- `make test` also runs the Linux transparent/protect-path socket-feature suite against `ciadpi-rs`
+- `make test` builds the Rust `ciadpi` artifact, runs the Rust oracle-diff suites, and checks the default `ciadpi` binary against the hidden C oracle runtime for `--help`, `--version`, and parse-failure parity
+- `make test` runs the Linux desync runtime, auto-trigger parity, routed namespace, and transparent/protect-path socket-feature suites against the default Rust `ciadpi` binary
 - `make test` also runs a Rust-only proxy subset for SOCKS4, SOCKS5 CONNECT, SOCKS5 UDP associate, HTTP CONNECT, UDP fake bursts, TLS tunnel relay, churn, no-domain/no-udp rejection, connect failure handling, SOCKS chaining, and IPv6 where available
 - `make test` also runs Rust runtime-migration coverage for pidfile handling, TCP Fast Open, delayed connect, cache stdout dumping, max-conn admission, and Shadowsocks env startup
+- `make test-install-cutover` verifies that `make install` ships only the Rust `ciadpi` binary and keeps the hidden C oracle out of the installed artifact set
+- `make test-windows-cross-check` cross-links the Rust workspace test binaries for `x86_64-pc-windows-gnu` so deferred Windows port regressions fail before runtime work starts
+- `make cutover-gates` runs `make test` plus the packet benchmark smoke gate required for the Linux cutover
 - `make test-sanitize` reruns those tests with AddressSanitizer and UndefinedBehaviorSanitizer
 - `make fuzz-packets` runs a standalone mutation-based fuzz smoke test over the packet corpus
 

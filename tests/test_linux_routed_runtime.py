@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 PROXY_BINARY = ""
+ORACLE_BINARY = ""
 PROJECT_ROOT = Path()
 
 PAYLOAD = (Path(__file__).resolve().parent / "corpus" / "packets" / "http_request.bin").read_bytes()
@@ -143,7 +144,10 @@ class ManagedProcess:
         self._log.close()
 
     def read_log(self) -> str:
-        self._log.flush()
+        try:
+            self._log.flush()
+        except ValueError:
+            pass
         path = Path(self._log.name)
         return path.read_text() if path.exists() else ""
 
@@ -250,7 +254,36 @@ class NamespaceLab:
 
 @unittest.skipUnless(NamespaceLab.supported(), "Linux network namespaces with passwordless sudo are unavailable")
 class RoutedLinuxRuntimeTests(unittest.TestCase):
+    oracle_probe_reason: str | None = None
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if not ORACLE_BINARY:
+            return
+        if Path(PROXY_BINARY).resolve() == Path(ORACLE_BINARY).resolve():
+            return
+        proc = run_command(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--binary",
+                str(Path(ORACLE_BINARY).resolve()),
+                "--project-root",
+                str(PROJECT_ROOT),
+            ],
+            check=False,
+        )
+        if proc.returncode != 0:
+            cls.oracle_probe_reason = (
+                "hidden C oracle does not pass routed fake-path tests in this environment\n"
+                f"stdout:\n{proc.stdout}\n"
+                f"stderr:\n{proc.stderr}"
+            )
+
     def setUp(self) -> None:
+        if self.oracle_probe_reason is not None:
+            self.skipTest(self.oracle_probe_reason)
         self.lab = NamespaceLab()
         self.lab.setup()
         self._processes: list[ManagedProcess] = []
@@ -383,10 +416,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)
     parser.add_argument("--project-root", required=True)
+    parser.add_argument("--oracle-binary")
     args = parser.parse_args()
 
-    global PROXY_BINARY, PROJECT_ROOT
+    global PROXY_BINARY, ORACLE_BINARY, PROJECT_ROOT
     PROXY_BINARY = args.binary
+    ORACLE_BINARY = args.oracle_binary or ""
     PROJECT_ROOT = Path(args.project_root).resolve()
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(RoutedLinuxRuntimeTests)

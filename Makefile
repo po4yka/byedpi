@@ -2,22 +2,25 @@ TARGET = ciadpi
 
 CPPFLAGS = -D_DEFAULT_SOURCE
 CFLAGS += -I. -std=c99 -O2 -Wall -Wno-unused -Wextra -Wno-unused-parameter -pedantic
+WIN_CC ?= x86_64-w64-mingw32-gcc
 WIN_LDFLAGS = -lws2_32 -lmswsock
 PYTHON ?= python3
 CLANG ?= clang
 CARGO ?= cargo
 SAN_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined
 FUZZ_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined
-RUST_BIN := target/debug/ciadpi-rs
+RUST_BIN := target/debug/ciadpi
 
 HEADERS = conev.h desync.h error.h extend.h kavl.h mpool.h packets.h params.h proxy.h win_service.h
 SRC = packets.c main.c conev.c proxy.c desync.c mpool.c extend.c
 WIN_SRC = win_service.c
 
 OBJ = $(SRC:.c=.o)
-WIN_OBJ = $(WIN_SRC:.c=.o)
 TEST_DIR := tests
 TEST_BIN_DIR := $(TEST_DIR)/bin
+WIN_OBJ_DIR := $(TEST_BIN_DIR)/windows
+WIN_ALL_SRC := $(SRC) $(WIN_SRC)
+WIN_ALL_OBJ := $(addprefix $(WIN_OBJ_DIR)/,$(WIN_ALL_SRC:.c=.o))
 PACKETS_CORPUS_DIR := $(TEST_DIR)/corpus/packets
 PACKETS_CORPUS_STAMP := $(PACKETS_CORPUS_DIR)/.stamp
 PACKETS_TEST_BIN := $(TEST_BIN_DIR)/test_packets
@@ -28,6 +31,7 @@ ORACLE_PACKETS_BIN := $(TEST_BIN_DIR)/oracle_packets
 ORACLE_CONFIG_BIN := $(TEST_BIN_DIR)/oracle_config
 ORACLE_PROTOCOL_BIN := $(TEST_BIN_DIR)/oracle_protocol
 ORACLE_DESYNC_BIN := $(TEST_BIN_DIR)/oracle_desync
+ORACLE_RUNTIME_BIN := $(TEST_BIN_DIR)/ciadpi-oracle
 ORACLE_BINS := $(ORACLE_PACKETS_BIN) $(ORACLE_CONFIG_BIN) $(ORACLE_PROTOCOL_BIN) $(ORACLE_DESYNC_BIN)
 SAN_TARGET := $(TARGET)-sanitize
 SAN_OBJ_DIR := $(TEST_BIN_DIR)/sanitize
@@ -38,15 +42,20 @@ INSTALL_DIR := $(DESTDIR)$(PREFIX)/bin/
 
 all: $(TARGET)
 
-$(TARGET): $(OBJ)
-	$(CC) -o $(TARGET) $(OBJ) $(LDFLAGS)
+$(TARGET): FORCE Cargo.toml
+	$(CARGO) build -p ciadpi-bin
+	install -m 755 $(RUST_BIN) $(TARGET)
 
-windows: $(OBJ) $(WIN_OBJ)
-	$(CC) -o $(TARGET).exe $(OBJ) $(WIN_OBJ) $(WIN_LDFLAGS)
+windows: $(WIN_ALL_OBJ)
+	$(WIN_CC) -o $(TARGET).exe $(WIN_ALL_OBJ) $(WIN_LDFLAGS)
 
 $(OBJ): $(HEADERS)
 .c.o:
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $<
+
+$(WIN_OBJ_DIR)/%.o: %.c $(HEADERS)
+	mkdir -p $(dir $@)
+	$(WIN_CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(PACKETS_CORPUS_STAMP): $(TEST_DIR)/generate_packets_corpus.py
 	mkdir -p $(PACKETS_CORPUS_DIR)
@@ -88,7 +97,11 @@ $(ORACLE_DESYNC_BIN): $(TEST_DIR)/oracle_desync.c $(ORACLE_COMMON_SRC) $(SRC) $(
 	mkdir -p $(TEST_BIN_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DCIADPI_NO_MAIN -DCIADPI_TESTING -I$(TEST_DIR) $(TEST_DIR)/oracle_desync.c $(ORACLE_COMMON_SRC) $(SRC) -o $(ORACLE_DESYNC_BIN)
 
-oracles: $(ORACLE_BINS)
+$(ORACLE_RUNTIME_BIN): $(OBJ)
+	mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $(ORACLE_RUNTIME_BIN) $(OBJ) $(LDFLAGS)
+
+oracles: $(ORACLE_BINS) $(ORACLE_RUNTIME_BIN)
 
 packets-corpus: $(PACKETS_CORPUS_STAMP)
 
@@ -104,8 +117,8 @@ test-desync-runtime: $(TARGET) oracles packets-corpus
 test-auto-runtime: $(TARGET)
 	$(PYTHON) $(TEST_DIR)/test_auto_runtime.py --binary ./$(TARGET)
 
-test-linux-routed-runtime: $(TARGET)
-	$(PYTHON) $(TEST_DIR)/test_linux_routed_runtime.py --binary ./$(TARGET) --project-root .
+test-linux-routed-runtime: $(TARGET) oracles
+	$(PYTHON) $(TEST_DIR)/test_linux_routed_runtime.py --binary ./$(TARGET) --oracle-binary ./$(ORACLE_RUNTIME_BIN) --project-root .
 
 test-linux-runtime-features: $(TARGET)
 	$(PYTHON) $(TEST_DIR)/test_linux_runtime_features.py --binary ./$(TARGET)
@@ -116,34 +129,37 @@ test-contract: $(TARGET) oracles packets-corpus
 test-rust: oracles packets-corpus Cargo.toml
 	$(CARGO) test --workspace
 
-rust-bin: Cargo.toml
-	$(CARGO) build -p ciadpi-bin
+rust-bin: $(TARGET)
 
-test-rust-binary-parity: $(TARGET) rust-bin
-	$(PYTHON) $(TEST_DIR)/test_rust_binary_parity.py --c-binary ./$(TARGET) --rust-binary ./$(RUST_BIN)
+test-rust-binary-parity: $(TARGET) oracles
+	$(PYTHON) $(TEST_DIR)/test_rust_binary_parity.py --c-binary ./$(ORACLE_RUNTIME_BIN) --rust-binary ./$(TARGET)
 
-test-rust-desync-runtime: rust-bin oracles packets-corpus
-	$(PYTHON) $(TEST_DIR)/test_desync_runtime.py --binary ./$(RUST_BIN) --bin-dir ./$(TEST_BIN_DIR) --project-root .
+test-rust-desync-runtime: test-desync-runtime
 
-test-rust-auto-runtime: rust-bin
-	$(PYTHON) $(TEST_DIR)/test_auto_runtime.py --binary ./$(RUST_BIN)
+test-rust-auto-runtime: test-auto-runtime
 
-test-rust-linux-routed-runtime: rust-bin
-	$(PYTHON) $(TEST_DIR)/test_linux_routed_runtime.py --binary ./$(RUST_BIN) --project-root .
+test-rust-linux-routed-runtime: test-linux-routed-runtime
 
-test-rust-linux-runtime-features: rust-bin
-	$(PYTHON) $(TEST_DIR)/test_linux_runtime_features.py --binary ./$(RUST_BIN)
+test-rust-linux-runtime-features: test-linux-runtime-features
 
-test-rust-runtime: rust-bin
-	$(PYTHON) $(TEST_DIR)/test_rust_runtime_subset.py --binary ./$(RUST_BIN)
+test-rust-runtime: $(TARGET)
+	$(PYTHON) $(TEST_DIR)/test_rust_runtime_subset.py --binary ./$(TARGET)
 
-test-rust-runtime-migration: rust-bin
-	$(PYTHON) $(TEST_DIR)/test_rust_runtime_migration.py --binary ./$(RUST_BIN)
+test-rust-runtime-migration: $(TARGET)
+	$(PYTHON) $(TEST_DIR)/test_rust_runtime_migration.py --binary ./$(TARGET)
+
+test-install-cutover: $(TARGET)
+	$(PYTHON) $(TEST_DIR)/test_install_cutover.py --project-root . --source-binary ./$(TARGET)
+
+test-windows-cross-check: Cargo.toml
+	$(CARGO) test --workspace --no-run --target x86_64-pc-windows-gnu
 
 bench-smoke: oracles packets-corpus Cargo.toml
 	$(CARGO) test -p ciadpi-packets benchmark_smoke -- --ignored --nocapture
 
-test: test-packets test-contract test-integration test-desync-runtime test-auto-runtime test-linux-routed-runtime test-linux-runtime-features test-rust test-rust-binary-parity test-rust-desync-runtime test-rust-auto-runtime test-rust-linux-routed-runtime test-rust-linux-runtime-features test-rust-runtime test-rust-runtime-migration
+cutover-gates: test test-install-cutover bench-smoke
+
+test: test-packets test-contract test-integration test-desync-runtime test-auto-runtime test-linux-routed-runtime test-linux-runtime-features test-rust test-rust-binary-parity test-rust-runtime test-rust-runtime-migration
 
 test-sanitize: $(PACKETS_CORPUS_STAMP) $(PACKETS_TEST_SAN_BIN) $(SAN_TARGET) oracles
 	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 $(PACKETS_TEST_SAN_BIN) $(PACKETS_CORPUS_DIR)
@@ -156,7 +172,8 @@ fuzz-packets: $(PACKETS_CORPUS_STAMP) $(FUZZ_PACKETS_BIN)
 	ASAN_OPTIONS=detect_leaks=0 $(FUZZ_PACKETS_BIN) $(PACKETS_CORPUS_DIR)
 
 clean:
-	rm -f $(TARGET) $(SAN_TARGET) $(TARGET).exe $(OBJ) $(WIN_OBJ) $(SAN_OBJ) $(PACKETS_TEST_BIN) $(PACKETS_TEST_SAN_BIN) $(FUZZ_PACKETS_BIN) $(ORACLE_BINS)
+	rm -f $(TARGET) $(SAN_TARGET) $(TARGET).exe $(OBJ) $(SAN_OBJ) $(PACKETS_TEST_BIN) $(PACKETS_TEST_SAN_BIN) $(FUZZ_PACKETS_BIN) $(ORACLE_BINS)
+	rm -f $(ORACLE_RUNTIME_BIN)
 	rm -rf $(TEST_BIN_DIR)
 	rm -f $(PACKETS_CORPUS_STAMP) $(PACKETS_CORPUS_DIR)/*.bin
 	rm -rf target
@@ -165,4 +182,6 @@ install: $(TARGET)
 	mkdir -p $(INSTALL_DIR)
 	install -m 755 $(TARGET) $(INSTALL_DIR)
 
-.PHONY: all windows clean install oracles packets-corpus rust-bin test-packets test-contract test-integration test-desync-runtime test-auto-runtime test-linux-routed-runtime test-linux-runtime-features test-rust test-rust-binary-parity test-rust-desync-runtime test-rust-auto-runtime test-rust-linux-routed-runtime test-rust-linux-runtime-features test-rust-runtime test-rust-runtime-migration bench-smoke test test-sanitize fuzz-packets
+FORCE:
+
+.PHONY: FORCE all windows clean install oracles packets-corpus rust-bin test-packets test-contract test-integration test-desync-runtime test-auto-runtime test-linux-routed-runtime test-linux-runtime-features test-rust test-rust-binary-parity test-rust-desync-runtime test-rust-auto-runtime test-rust-linux-routed-runtime test-rust-linux-runtime-features test-rust-runtime test-rust-runtime-migration test-install-cutover test-windows-cross-check bench-smoke cutover-gates test test-sanitize fuzz-packets

@@ -274,7 +274,7 @@ static struct tf_s *getTFE(void)
         }
         DWORD ret = WaitForMultipleObjects(MAX_TF, events, FALSE, 0);
         
-        if (ret >= WAIT_OBJECT_0 && ret < WAIT_OBJECT_0 + MAX_TF) {
+        if (ret < WAIT_OBJECT_0 + (DWORD)MAX_TF) {
             s = &tf_exems[ret - WAIT_OBJECT_0];
             CloseHandle(s->ov.hEvent);
             CloseHandle(s->tfile);

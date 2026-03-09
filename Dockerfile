@@ -1,5 +1,5 @@
 FROM docker.io/alpine AS build
-RUN apk add --no-cache build-base linux-headers
+RUN apk add --no-cache build-base cargo linux-headers rust
 WORKDIR /usr/local/src/byedpi
 COPY . .
 RUN LDFLAGS=-static make

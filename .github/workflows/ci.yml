@@ -17,10 +17,14 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
       - name: Install Linux packet capture and routing tooling
-        run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2 iptables
-      - name: Run Linux contract and differential suite
-        run: make test
+        run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2 iptables mingw-w64
+      - name: Run Linux cutover gates
+        run: make cutover-gates
+      - name: Run Windows cross-target Rust check
+        run: make test-windows-cross-check
       - name: Run sanitizer suite
         run: make test-sanitize
 
@@ -33,11 +37,13 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
       - name: Install Linux packet capture and routing tooling
-        run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2 iptables
+        run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2 iptables mingw-w64
       - name: Run full nightly verification
         run: |
-          make test
+          make cutover-gates
+          make test-windows-cross-check
           make test-sanitize
           make fuzz-packets
-          make bench-smoke

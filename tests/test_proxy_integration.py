@@ -76,6 +76,19 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def default_conn_ip() -> str:
+    if not socket.has_ipv6:
+        return "0.0.0.0"
+    probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        probe.bind(("::1", 0))
+    except OSError:
+        return "0.0.0.0"
+    finally:
+        probe.close()
+    return "::"
+
+
 def recv_exact(sock: socket.socket, size: int) -> bytes:
     chunks = bytearray()
     while len(chunks) < size:
@@ -189,7 +202,7 @@ class ProxyProcess:
             "-p",
             str(self.port),
             "-I",
-            "0.0.0.0",
+            default_conn_ip(),
         ]
         if self.http_connect:
             args.append("-G")

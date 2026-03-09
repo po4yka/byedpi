@@ -143,11 +143,23 @@ class ProtectServer:
                     raise AssertionError("protect helper did not receive a socket fd")
                 dup_sock = socket.fromfd(received_fd, socket.AF_INET, socket.SOCK_STREAM)
                 try:
-                    self.received_peer = dup_sock.getpeername()
+                    conn.sendall(b"1")
+                    deadline = time.time() + 5
+                    last_error = None
+                    while time.time() < deadline:
+                        try:
+                            self.received_peer = dup_sock.getpeername()
+                            break
+                        except OSError as exc:
+                            last_error = str(exc)
+                            time.sleep(0.05)
+                    if self.received_peer is None:
+                        raise AssertionError(
+                            f"protect helper did not observe connected peer: {last_error}"
+                        )
                 finally:
                     dup_sock.close()
                     os.close(received_fd)
-                conn.sendall(b"1")
             finally:
                 conn.close()
                 server.close()

@@ -84,7 +84,7 @@ pub fn run_proxy(config: RuntimeConfig) -> io::Result<()> {
                         thread::spawn(move || {
                             let _slot = _slot;
                             if let Err(err) = handle_client(client, &state) {
-                                eprintln!("ciadpi-rs: client error: {err}");
+                                eprintln!("ciadpi: client error: {err}");
                             }
                         });
                     }

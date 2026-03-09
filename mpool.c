@@ -152,36 +152,43 @@ void mem_destroy(struct mphdr *hdr)
     free(hdr);
 }
 
+static void dump_cache_node(const struct elem *node, FILE *out, struct desync_params *dp)
+{
+    if (!node) {
+        return;
+    }
+
+    dump_cache_node(node->head.p[0], out, dp);
+
+    struct elem_i *p = (struct elem_i *)node;
+    if (p->main.data && p->dp == dp) {
+        struct cache_key *key = (struct cache_key *)p->main.data;
+        char addr_str[INET6_ADDRSTRLEN];
+
+        if (key->family == AF_INET) {
+            inet_ntop(AF_INET, &key->ip.v4, addr_str, sizeof(addr_str));
+        }
+        else {
+            inet_ntop(AF_INET6, &key->ip.v6, addr_str, sizeof(addr_str));
+        }
+
+        int bitlen = p->main.len - offsetof(struct cache_key, ip.v4) * 8;
+        fprintf(out, "0 %s %d %d %jd %.*s\n",
+            addr_str, bitlen, ntohs(key->port),
+            (intmax_t)p->time, p->extra_len ? p->extra_len : 1,
+            p->extra ? p->extra : "-");
+    }
+
+    dump_cache_node(node->head.p[1], out, dp);
+}
+
 
 void dump_cache(struct mphdr *hdr, FILE *out, struct desync_params *dp)
 {
     if (!hdr->root) {
         return;
     }
-    kavl_itr_t(my) itr;
-    kavl_itr_first(my, hdr->root, &itr);
-    do {
-        struct elem_i *p = (struct elem_i *)kavl_at(&itr);
-        if (!p || !p->main.data) {
-            continue;
-        }
-        struct cache_key *key = (struct cache_key *)p->main.data;
-        
-        if (p->dp != dp) {
-            continue;
-        }
-        char ADDR_STR[INET6_ADDRSTRLEN];
-        if (key->family == AF_INET)
-            inet_ntop(AF_INET, &key->ip.v4, ADDR_STR, sizeof(ADDR_STR));
-        else
-            inet_ntop(AF_INET6, &key->ip.v6, ADDR_STR, sizeof(ADDR_STR));
-        
-        int bitlen = p->main.len - offsetof(struct cache_key, ip.v4) * 8;
-        fprintf(out, "0 %s %d %d %jd %.*s\n", 
-            ADDR_STR, bitlen, ntohs(key->port),
-            (intmax_t)p->time, p->extra_len ? p->extra_len : 1, p->extra ? p->extra : "-");
-    } 
-    while (kavl_itr_next(my, &itr));
+    dump_cache_node(hdr->root, out, dp);
     fflush(out);
 }
 

@@ -61,7 +61,7 @@ pub struct DesyncPlan {
 pub struct DesyncError;
 
 fn init_proto_info(buffer: &[u8], info: &mut ProtoInfo) {
-    if info.kind != 0 {
+    if info.host_len != 0 || info.host_pos != 0 {
         return;
     }
     if let Some(host) = parse_tls(buffer) {
@@ -69,7 +69,9 @@ fn init_proto_info(buffer: &[u8], info: &mut ProtoInfo) {
         info.host_len = host.len();
         info.host_pos = buffer.windows(host.len()).position(|window| window == host).unwrap_or(0);
     } else if let Some(host) = parse_http(buffer) {
-        info.kind = IS_HTTP;
+        if info.kind == 0 {
+            info.kind = IS_HTTP;
+        }
         info.host_len = host.host.len();
         info.host_pos = buffer
             .windows(host.host.len())

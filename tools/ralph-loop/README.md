@@ -72,4 +72,4 @@ Remaining phases in the active manifest:
 - `scripts/ralph-loop start` accepts either `--task "<text>"` or `--task-file <path>`.
 - `scripts/ralph-rust-migration list` shows only the remaining active backlog; completed phases stay documented in the archived task specs.
 - Every generated run bundle records the exact `ralph run` command in `launch.txt`.
-- The current C implementation remains the Linux oracle until the phase 6 cutover task is complete.
+- The Rust `ciadpi` binary is the Linux-facing default during phase 6 work, and the C runtime remains available as hidden oracle infrastructure for diffing and rollback.

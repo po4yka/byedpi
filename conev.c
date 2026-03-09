@@ -88,7 +88,11 @@ void del_event(struct poolhd *pool, struct eval *val)
         return;
     }
     #ifdef NOEPOLL
+    #ifdef _WIN32
+    assert((SOCKET)val->fd == pool->pevents[val->index].fd);
+    #else
     assert(val->fd == pool->pevents[val->index].fd);
+    #endif
     #else
     epoll_ctl(pool->efd, EPOLL_CTL_DEL, val->fd, 0);
     #endif

@@ -119,7 +119,7 @@ fn print_error(err: &ConfigError) {
     match &err.value {
         Some(value) => eprintln!("invalid value: {} {}", canonical_option(&err.option), value),
         None if err.option.starts_with('-') => {
-            eprintln!("ciadpi-rs: unrecognized option `{}`", err.option)
+            eprintln!("ciadpi: unrecognized option `{}`", err.option)
         }
         None => eprintln!("invalid option: {}", err.option),
     }
@@ -158,14 +158,14 @@ fn run() -> i32 {
             let _process = match process::ProcessGuard::prepare(&config) {
                 Ok(guard) => guard,
                 Err(err) => {
-                    eprintln!("ciadpi-rs: {err}");
+                    eprintln!("ciadpi: {err}");
                     return 1;
                 }
             };
             match runtime::run_proxy(config) {
                 Ok(()) => 0,
                 Err(err) => {
-                    eprintln!("ciadpi-rs: {err}");
+                    eprintln!("ciadpi: {err}");
                     1
                 }
             }

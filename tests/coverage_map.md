@@ -20,13 +20,15 @@ This file freezes the current Linux-facing contract before the Rust cutover.
 | Auto/runtime parity | `AUTO_NOPOST` / `AUTO_SORT`, cache promotion and reuse, cache-backed connect fallback, `redirect`, `ssl_err`, `torst`, and partial-TLS timeout count/byte-limit behavior match the C runtime contract | `tests/test_auto_runtime.py::AutoRuntimeTests` |
 | Linux routed behavior | multi-namespace end-to-end assertions for `fake`, `md5sig`, and `drop-sack` confirm original payload delivery across routed loss/rejection paths | `tests/test_linux_routed_runtime.py::RoutedLinuxRuntimeTests` |
 | Linux socket features | `--protect-path` passes outbound FDs to the helper socket and `--transparent` relays redirected traffic to the original destination | `tests/test_linux_runtime_features.py` |
-| Rust desync runtime | `ciadpi-rs` passes the same desync runtime and Linux loopback wire suite as the C binary | `make test-rust-desync-runtime`, `tests/test_desync_runtime.py` |
-| Rust auto/runtime parity | `ciadpi-rs` passes the same cache, auto-trigger replay, and partial-timeout policy suite as the C binary | `make test-rust-auto-runtime`, `tests/test_auto_runtime.py` |
-| Rust routed desync runtime | `ciadpi-rs` passes the same routed Linux fake/md5sig/drop-sack suite as the C binary | `make test-rust-linux-routed-runtime`, `tests/test_linux_routed_runtime.py` |
-| Rust Linux socket features | `ciadpi-rs` passes the same transparent/protect-path runtime suite as the C binary | `make test-rust-linux-runtime-features`, `tests/test_linux_runtime_features.py` |
-| Rust runtime migration | `ciadpi-rs` pidfile handling, TCP Fast Open, delayed connect, cache stdout dumping, max-conn admission, and Shadowsocks env startup behave like the C binary | `make test-rust-runtime-migration`, `tests/test_rust_runtime_migration.py` |
-| Rust binary parity | side-by-side `ciadpi` vs `ciadpi-rs` parity for `--help`, `--version`, and parse-failure surfaces | `tests/test_rust_binary_parity.py`, `crates/ciadpi-bin/tests/cli.rs` |
-| Rust runtime subset | `ciadpi-rs` SOCKS4, SOCKS5 CONNECT, HTTP CONNECT, SOCKS5 UDP associate, UDP fake bursts, TLS tunneling, churn, no-domain rejection, no-udp rejection, connect failure handling, SOCKS chaining, and IPv6 echo where available | `tests/test_rust_runtime_subset.py` |
+| Rust desync runtime | default `ciadpi` (Rust) passes the same desync runtime and Linux loopback wire suite as the hidden C oracle runtime | `make test-desync-runtime`, `tests/test_desync_runtime.py` |
+| Rust auto/runtime parity | default `ciadpi` (Rust) passes the same cache, auto-trigger replay, and partial-timeout policy suite as the hidden C oracle runtime | `make test-auto-runtime`, `tests/test_auto_runtime.py` |
+| Rust routed desync runtime | default `ciadpi` (Rust) passes the same routed Linux fake/md5sig/drop-sack suite as the hidden C oracle runtime | `make test-linux-routed-runtime`, `tests/test_linux_routed_runtime.py` |
+| Rust Linux socket features | default `ciadpi` (Rust) passes the same transparent/protect-path runtime suite as the hidden C oracle runtime | `make test-linux-runtime-features`, `tests/test_linux_runtime_features.py` |
+| Rust runtime migration | default `ciadpi` (Rust) pidfile handling, TCP Fast Open, delayed connect, cache stdout dumping, max-conn admission, and Shadowsocks env startup behave like the C binary | `make test-rust-runtime-migration`, `tests/test_rust_runtime_migration.py` |
+| Rust binary parity | side-by-side default `ciadpi` (Rust) vs hidden C oracle runtime parity for `--help`, `--version`, and parse-failure surfaces | `make test-rust-binary-parity`, `tests/test_rust_binary_parity.py`, `crates/ciadpi-bin/tests/cli.rs` |
+| Rust runtime subset | default `ciadpi` (Rust) covers SOCKS4, SOCKS5 CONNECT, HTTP CONNECT, SOCKS5 UDP associate, UDP fake bursts, TLS tunneling, churn, no-domain rejection, no-udp rejection, connect failure handling, SOCKS chaining, and IPv6 echo where available | `make test-rust-runtime`, `tests/test_rust_runtime_subset.py` |
+| Install/package cutover | `make install` ships the Rust `ciadpi` binary and does not install hidden oracle artifacts | `make test-install-cutover`, `tests/test_install_cutover.py` |
+| Windows cross-target buildability | Rust workspace test binaries link for `x86_64-pc-windows-gnu` so deferred Windows port regressions fail fast before runtime validation | `make test-windows-cross-check`, `.github/workflows/ci.yml` |
 | Proxy behavior | SOCKS4, SOCKS5, HTTP CONNECT, UDP associate, TLS tunneling, external SOCKS chaining, upstream connect failure handling, IPv6, `--no-domain`, `--no-udp`, `--udp-fake` bursts | `tests/test_proxy_integration.py` |
 | Stress | connection churn over repeated proxied SOCKS5 sessions | `tests/test_proxy_integration.py::ProxyIntegrationTests.test_connection_churn_echo` |
 | Safety | ASan/UBSan C builds, packet fuzz smoke, Rust property tests | `make test-sanitize`, `make fuzz-packets`, `crates/ciadpi-packets/src/lib.rs` |
@@ -34,6 +36,6 @@ This file freezes the current Linux-facing contract before the Rust cutover.
 
 ## Planned follow-ups
 
-- Promotion thresholds for churn and benchmark regressions once the Rust binary is the active runtime path.
-- Linux cutover work that renames `ciadpi-rs` into the default `ciadpi` artifact while keeping the C binary as oracle-only test infrastructure.
+- Promotion thresholds for churn and benchmark regressions now that the Rust binary is the active Linux runtime path.
+- Removal plan for the hidden C oracle runtime after the transition release window ends.
 - Deferred Windows runtime and service migration after the Linux cutover is stable.

@@ -1,6 +1,5 @@
 use std::io;
 use std::net::{SocketAddr, TcpStream};
-use std::os::fd::AsRawFd;
 
 pub fn enable_tcp_fastopen_connect() -> io::Result<()> {
     Err(io::Error::new(
@@ -13,7 +12,7 @@ pub fn set_tcp_md5sig(_stream: &TcpStream, _key_len: u16) -> io::Result<()> {
     Ok(())
 }
 
-pub fn protect_socket<T: AsRawFd>(_socket: &T, _path: &str) -> io::Result<()> {
+pub fn protect_socket<T>(_socket: &T, _path: &str) -> io::Result<()> {
     Ok(())
 }
 

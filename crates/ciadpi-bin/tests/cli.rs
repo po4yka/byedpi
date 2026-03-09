@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn rust_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ciadpi-rs")
+    env!("CARGO_BIN_EXE_ciadpi")
 }
 
 fn run(args: &[&str], dry_run: bool) -> std::process::Output {
@@ -10,7 +10,7 @@ fn run(args: &[&str], dry_run: bool) -> std::process::Output {
     if dry_run {
         command.env("CIADPI_RS_DRY_RUN", "1");
     }
-    command.output().expect("run ciadpi-rs")
+    command.output().expect("run ciadpi")
 }
 
 #[test]
@@ -67,6 +67,6 @@ fn dry_run_accepts_shadowsocks_bootstrap_env() {
             "--no-domain --no-udp --auto torst --split 1+s --to-socks5 127.0.0.1:1081",
         )
         .output()
-        .expect("run ciadpi-rs");
+        .expect("run ciadpi");
     assert!(output.status.success());
 }

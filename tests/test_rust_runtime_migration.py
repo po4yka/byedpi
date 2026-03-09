@@ -20,6 +20,7 @@ from test_proxy_integration import (
     parse_socks5_reply,
     recv_exact,
     recv_socks5_reply,
+    socks_auth,
     socks_connect,
 )
 
@@ -42,7 +43,7 @@ class ManagedProxyProcess:
         self.env_updates = env_updates or {}
         self.use_default_listen_args = use_default_listen_args
         self.port = port or free_port()
-        self._log = tempfile.NamedTemporaryFile(prefix="ciadpi-rs-", suffix=".log", delete=False)
+        self._log = tempfile.NamedTemporaryFile(prefix="ciadpi-", suffix=".log", delete=False)
         self._proc: subprocess.Popen[str] | None = None
 
     @property
@@ -71,9 +72,14 @@ class ManagedProxyProcess:
         deadline = time.time() + 5
         while time.time() < deadline:
             try:
-                with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
-                    return
-            except OSError:
+                if self.use_default_listen_args:
+                    with socks_auth(self.port):
+                        pass
+                else:
+                    with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
+                        pass
+                return
+            except (AssertionError, OSError):
                 if self._proc.poll() is not None:
                     raise AssertionError(f"proxy exited early:\n{self.read_log()}")
                 time.sleep(0.05)
