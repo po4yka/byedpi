@@ -130,8 +130,7 @@ fn startup_env() -> StartupEnv {
     StartupEnv::from_env_and_cwd(&cwd)
 }
 
-fn run() -> i32 {
-    let args: Vec<String> = env::args().skip(1).collect();
+fn run_args(args: Vec<String>) -> i32 {
     let startup = startup_env();
     let parsed = match parse_cli(&args, &startup) {
         Ok(parsed) => parsed,
@@ -171,6 +170,22 @@ fn run() -> i32 {
             }
         }
     }
+}
+
+fn run() -> i32 {
+    let args: Vec<String> = env::args().skip(1).collect();
+
+    #[cfg(target_os = "windows")]
+    match platform::windows::maybe_run_as_service(&args, run_args) {
+        Ok(Some(code)) => return code,
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("ciadpi: {err}");
+            return 1;
+        }
+    }
+
+    run_args(args)
 }
 
 fn main() {

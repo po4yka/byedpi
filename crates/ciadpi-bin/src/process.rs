@@ -49,9 +49,13 @@ pub fn shutdown_requested() -> bool {
     SHUTDOWN.load(Ordering::Relaxed)
 }
 
+pub fn request_shutdown() {
+    SHUTDOWN.store(true, Ordering::Relaxed);
+}
+
 #[cfg(unix)]
 extern "C" fn handle_signal(_signal: libc::c_int) {
-    SHUTDOWN.store(true, Ordering::Relaxed);
+    request_shutdown();
 }
 
 #[cfg(unix)]

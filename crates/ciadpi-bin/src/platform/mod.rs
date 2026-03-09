@@ -7,8 +7,11 @@ use socket2::{Domain, Protocol, Socket, Type};
 #[cfg(target_os = "linux")]
 mod linux;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod stub;
+
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 pub fn detect_default_ttl() -> io::Result<u8> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
@@ -24,6 +27,11 @@ pub fn enable_tcp_fastopen_connect<T: std::os::fd::AsRawFd>(socket: &T) -> io::R
 
 #[cfg(not(target_os = "linux"))]
 pub fn enable_tcp_fastopen_connect<T>(_socket: &T) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::enable_tcp_fastopen_connect();
+    }
+    #[cfg(not(target_os = "windows"))]
     stub::enable_tcp_fastopen_connect()
 }
 
@@ -34,6 +42,11 @@ pub fn set_tcp_md5sig(stream: &TcpStream, key_len: u16) -> io::Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn set_tcp_md5sig(stream: &TcpStream, key_len: u16) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::set_tcp_md5sig(stream, key_len);
+    }
+    #[cfg(not(target_os = "windows"))]
     stub::set_tcp_md5sig(stream, key_len)
 }
 
@@ -44,6 +57,11 @@ pub fn protect_socket<T: std::os::fd::AsRawFd>(socket: &T, path: &str) -> io::Re
 
 #[cfg(not(target_os = "linux"))]
 pub fn protect_socket<T>(socket: &T, path: &str) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::protect_socket(socket, path);
+    }
+    #[cfg(not(target_os = "windows"))]
     stub::protect_socket(socket, path)
 }
 
@@ -54,6 +72,11 @@ pub fn original_dst(stream: &TcpStream) -> io::Result<SocketAddr> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn original_dst(stream: &TcpStream) -> io::Result<SocketAddr> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::original_dst(stream);
+    }
+    #[cfg(not(target_os = "windows"))]
     stub::original_dst(stream)
 }
 
@@ -64,6 +87,11 @@ pub fn attach_drop_sack(stream: &TcpStream) -> io::Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn attach_drop_sack(stream: &TcpStream) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::attach_drop_sack(stream);
+    }
+    #[cfg(not(target_os = "windows"))]
     stub::attach_drop_sack(stream)
 }
 
@@ -74,6 +102,11 @@ pub fn detach_drop_sack(stream: &TcpStream) -> io::Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn detach_drop_sack(stream: &TcpStream) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::detach_drop_sack(stream);
+    }
+    #[cfg(not(target_os = "windows"))]
     stub::detach_drop_sack(stream)
 }
 
@@ -111,6 +144,11 @@ pub fn send_fake_tcp(
     _wait_send: bool,
     _await_interval: Duration,
 ) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::send_fake_tcp(stream, fake_prefix, ttl, md5sig, default_ttl);
+    }
+    #[cfg(not(target_os = "windows"))]
     stub::send_fake_tcp(stream, fake_prefix, ttl, md5sig, default_ttl)
 }
 
@@ -129,5 +167,10 @@ pub fn wait_tcp_stage(
     wait_send: bool,
     await_interval: Duration,
 ) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows::wait_tcp_stage(stream, wait_send, await_interval);
+    }
+    #[cfg(not(target_os = "windows"))]
     stub::wait_tcp_stage(stream, wait_send, await_interval)
 }
