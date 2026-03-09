@@ -21,10 +21,16 @@ fn help_and_version_are_available() {
     assert!(help_text.contains("--no-domain"));
     assert!(help_text.contains("--cache-file"));
     assert!(help_text.contains("--split"));
+    assert!(help_text.contains("--fake-offset"));
 
     let version = run(&["--version"], false);
     assert!(version.status.success());
-    assert_eq!(String::from_utf8(version.stdout).expect("utf8 version").trim(), "17.3");
+    assert_eq!(
+        String::from_utf8(version.stdout)
+            .expect("utf8 version")
+            .trim(),
+        "17.3"
+    );
 }
 
 #[test]
@@ -33,6 +39,13 @@ fn invalid_value_fails_with_contract_error_shape() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
     assert!(stderr.contains("invalid value: -t 999"));
+}
+
+#[test]
+fn invalid_argument_fails_with_diagnostic_output() {
+    let output = run(&["--definitely-invalid"], false);
+    assert!(!output.status.success());
+    assert!(!output.stderr.is_empty() || !output.stdout.is_empty());
 }
 
 #[test]

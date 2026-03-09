@@ -8,8 +8,7 @@ use ciadpi_config::{
     AUTO_NOPOST, AUTO_SORT, DETECT_RECONN,
 };
 use ciadpi_packets::{
-    is_http, is_tls_client_hello, parse_http, parse_tls, IS_HTTP, IS_HTTPS, IS_IPV4, IS_TCP,
-    IS_UDP,
+    is_http, is_tls_client_hello, parse_http, parse_tls, IS_HTTP, IS_HTTPS, IS_IPV4, IS_TCP, IS_UDP,
 };
 
 #[derive(Debug, Clone)]
@@ -30,6 +29,14 @@ struct CacheRecord {
     entry: CacheEntry,
     group_index: usize,
     attempted_mask: u64,
+}
+
+pub struct RouteAdvance<'a> {
+    pub dest: SocketAddr,
+    pub payload: Option<&'a [u8]>,
+    pub trigger: u32,
+    pub can_reconnect: bool,
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -76,7 +83,8 @@ impl RuntimeCache {
 
     pub fn lookup(&mut self, config: &RuntimeConfig, dest: SocketAddr) -> Option<ConnectionRoute> {
         let now = now_unix();
-        self.records.retain(|record| !is_expired(config, record, now));
+        self.records
+            .retain(|record| !is_expired(config, record, now));
         self.records
             .iter()
             .find(|record| cache_matches(&record.entry, dest))
@@ -121,7 +129,8 @@ impl RuntimeCache {
 
     pub fn clear(&mut self, config: &RuntimeConfig, dest: SocketAddr) -> io::Result<()> {
         let before = self.records.len();
-        self.records.retain(|record| !cache_matches(&record.entry, dest));
+        self.records
+            .retain(|record| !cache_matches(&record.entry, dest));
         if self.records.len() == before {
             return Ok(());
         }
@@ -147,7 +156,11 @@ impl RuntimeCache {
         std::fs::write(path, dump_cache_entries(&entries))
     }
 
-    pub fn dump_stdout_groups<W: Write>(&self, config: &RuntimeConfig, mut writer: W) -> io::Result<()> {
+    pub fn dump_stdout_groups<W: Write>(
+        &self,
+        config: &RuntimeConfig,
+        mut writer: W,
+    ) -> io::Result<()> {
         for (group_index, group) in config.groups.iter().enumerate() {
             if group.cache_file.as_deref() != Some("-") {
                 continue;
@@ -173,13 +186,9 @@ impl RuntimeCache {
         &mut self,
         config: &RuntimeConfig,
         route: &ConnectionRoute,
-        dest: SocketAddr,
-        payload: Option<&[u8]>,
-        trigger: u32,
-        can_reconnect: bool,
-        host: Option<String>,
+        request: RouteAdvance<'_>,
     ) -> io::Result<Option<ConnectionRoute>> {
-        if !can_reconnect && (config.auto_level & AUTO_NOPOST) != 0 {
+        if !request.can_reconnect && (config.auto_level & AUTO_NOPOST) != 0 {
             return Ok(None);
         }
 
@@ -187,7 +196,15 @@ impl RuntimeCache {
             group.fail_count += 1;
         }
 
-        let next = select_next_group(config, self, route, dest, payload, trigger, can_reconnect);
+        let next = select_next_group(
+            config,
+            self,
+            route,
+            request.dest,
+            request.payload,
+            request.trigger,
+            request.can_reconnect,
+        );
 
         if (config.auto_level & AUTO_SORT) != 0 {
             if let Some(ref next_route) = next {
@@ -214,15 +231,15 @@ impl RuntimeCache {
             Some(next_route) => {
                 self.store(
                     config,
-                    dest,
+                    request.dest,
                     next_route.group_index,
                     next_route.attempted_mask,
-                    host,
+                    request.host,
                 )?;
                 Ok(Some(next_route))
             }
             None => {
-                self.clear(config, dest)?;
+                self.clear(config, request.dest)?;
                 Ok(None)
             }
         }
@@ -420,8 +437,12 @@ fn cache_matches(entry: &CacheEntry, dest: SocketAddr) -> bool {
         return false;
     }
     match (entry.addr, dest.ip()) {
-        (IpAddr::V4(lhs), IpAddr::V4(rhs)) => prefix_match(&lhs.octets(), &rhs.octets(), entry.bits as u8),
-        (IpAddr::V6(lhs), IpAddr::V6(rhs)) => prefix_match(&lhs.octets(), &rhs.octets(), entry.bits as u8),
+        (IpAddr::V4(lhs), IpAddr::V4(rhs)) => {
+            prefix_match(&lhs.octets(), &rhs.octets(), entry.bits as u8)
+        }
+        (IpAddr::V6(lhs), IpAddr::V6(rhs)) => {
+            prefix_match(&lhs.octets(), &rhs.octets(), entry.bits as u8)
+        }
         _ => false,
     }
 }

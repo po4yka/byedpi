@@ -22,34 +22,27 @@ from test_proxy_integration import ProxyProcess, ThreadingTCPServer, socks_conne
 
 
 PROXY_BINARY = ""
-BIN_DIR = Path()
 PROJECT_ROOT = Path()
+DESYNC_FIXTURES: dict[str, object] | None = None
 
 
 def packets_corpus(name: str) -> Path:
     return PROJECT_ROOT / "tests" / "corpus" / "packets" / name
 
 
-def oracle(name: str) -> str:
-    path = BIN_DIR / name
-    if not path.exists():
-        raise AssertionError(f"missing oracle binary: {path}")
-    return str(path)
+def desync_fixtures() -> dict[str, object]:
+    global DESYNC_FIXTURES
+    if DESYNC_FIXTURES is None:
+        fixture_path = PROJECT_ROOT / "tests" / "corpus" / "rust-fixtures" / "desync_oracle.json"
+        DESYNC_FIXTURES = json.loads(fixture_path.read_text())
+    return DESYNC_FIXTURES
 
 
-def run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, check=False)
-
-
-def run_json_command(args: list[str]) -> dict[str, object]:
-    proc = run_command(args)
-    if proc.returncode != 0:
-        raise AssertionError(
-            f"command failed ({proc.returncode}): {' '.join(args)}\n"
-            f"stdout:\n{proc.stdout}\n"
-            f"stderr:\n{proc.stderr}"
-        )
-    return json.loads(proc.stdout)
+def desync_fixture(name: str) -> dict[str, object]:
+    fixture = desync_fixtures().get(name)
+    if not isinstance(fixture, dict):
+        raise AssertionError(f"missing desync fixture: {name}")
+    return fixture
 
 
 class RecordingTCPServer(ThreadingTCPServer):
@@ -313,34 +306,21 @@ class DesyncRuntimeTests(unittest.TestCase):
             time.sleep(0.05)
         return server
 
-    def _plan_hex(self, payload_name: str, *args: str) -> bytes:
-        data = run_json_command(
-            [
-                oracle("oracle_desync"),
-                "plan",
-                str(packets_corpus(payload_name)),
-                "7",
-                *args,
-            ]
-        )
-        self.assertTrue(data["ok"])
-        return bytes.fromhex(str(data["tampered_hex"]))
-
-    def test_mod_http_runtime_matches_oracle(self) -> None:
+    def test_mod_http_runtime_matches_fixture(self) -> None:
         payload = packets_corpus("http_request.bin").read_bytes()
-        expected = self._plan_hex("http_request.bin", "--mod-http", "rh")
+        expected = bytes.fromhex(str(desync_fixture("runtime_mod_http")["tampered_hex"]))
         server = self._send_once(payload, ["--mod-http", "rh"])
         self.assertEqual(server.streams[0], expected)
 
-    def test_tlsminor_runtime_matches_oracle(self) -> None:
+    def test_tlsminor_runtime_matches_fixture(self) -> None:
         payload = packets_corpus("tls_client_hello.bin").read_bytes()
-        expected = self._plan_hex("tls_client_hello.bin", "--tlsminor", "5")
+        expected = bytes.fromhex(str(desync_fixture("runtime_tlsminor")["tampered_hex"]))
         server = self._send_once(payload, ["--tlsminor", "5"])
         self.assertEqual(server.streams[0], expected)
 
-    def test_tlsrec_runtime_matches_oracle(self) -> None:
+    def test_tlsrec_runtime_matches_fixture(self) -> None:
         payload = packets_corpus("tls_client_hello.bin").read_bytes()
-        expected = self._plan_hex("tls_client_hello.bin", "--tlsrec", "32")
+        expected = bytes.fromhex(str(desync_fixture("runtime_tlsrec")["tampered_hex"]))
         server = self._send_once(payload, ["--tlsrec", "32"])
         self.assertEqual(server.streams[0], expected)
 
@@ -467,13 +447,11 @@ class LinuxWireCaptureTests(unittest.TestCase):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)
-    parser.add_argument("--bin-dir", required=True)
     parser.add_argument("--project-root", required=True)
     args = parser.parse_args()
 
-    global PROXY_BINARY, BIN_DIR, PROJECT_ROOT
+    global PROXY_BINARY, PROJECT_ROOT
     PROXY_BINARY = args.binary
-    BIN_DIR = Path(args.bin_dir).resolve()
     PROJECT_ROOT = Path(args.project_root).resolve()
 
     suite = unittest.TestSuite()

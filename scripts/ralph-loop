@@ -4,14 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-CONFIG_PATH="tools/ralph-loop/config/ralph.core.yml"
+CONFIG_PATH="ralph.yml"
 TEMPLATE_DIR="tools/ralph-loop/templates"
 RUNS_ROOT=".ralph-loop/runs"
+DEFAULT_WORKFLOW="builtin:feature"
 
 usage() {
   cat <<'USAGE'
 Usage:
   scripts/ralph-loop start --backend {claude|codex} (--task "<text>" | --task-file <path>) [--slug <name>] [--max-iterations <n>] [--workflow builtin:feature] [--dry-run] [--no-auto-merge]
+  scripts/ralph-loop resume-run <run-id> [--max-iterations <n>] [--dry-run]
+  scripts/ralph-loop doctor [--workflow builtin:feature]
+  scripts/ralph-loop preflight [--workflow builtin:feature] [--strict]
   scripts/ralph-loop status
   scripts/ralph-loop logs <loop-id> [--follow]
   scripts/ralph-loop diff <loop-id> [--stat]
@@ -19,6 +23,9 @@ Usage:
 
 Commands:
   start   Prepare run bundle and launch Ralph loop
+  resume-run Resume an existing run bundle with `ralph run --continue`
+  doctor  Run `ralph doctor` for this repository
+  preflight Run `ralph preflight` for this repository
   status  Alias for `ralph loops list`
   logs    Alias for `ralph loops logs`
   diff    Alias for `ralph loops diff`
@@ -87,7 +94,7 @@ start_cmd() {
   local task_file_input=""
   local slug=""
   local max_iterations=""
-  local workflow="builtin:feature"
+  local workflow="$DEFAULT_WORKFLOW"
   local dry_run="0"
   local no_auto_merge="0"
 
@@ -255,9 +262,6 @@ DECISIONS
 
   render_template "$prompt_template" "$prompt_file" "$run_id" "$backend" "$workflow" "$created_at" "$task_file" "$scratchpad_path" "$specs_dir_path"
 
-  local prompt_text
-  prompt_text="$(cat "$prompt_file")"
-
   local cmd
   cmd=(
     ralph run
@@ -266,7 +270,7 @@ DECISIONS
     -c "core.specs_dir=$specs_dir_path"
     -H "$workflow"
     -b "$backend"
-    -p "$prompt_text"
+    -P "$prompt_file"
   )
 
   if [[ -n "$max_iterations" ]]; then
@@ -299,6 +303,8 @@ META
   echo "Prepared Ralph run bundle: $run_dir"
   echo "Launch command:"
   echo "  $launch_cmd"
+  echo "Note: Ralph 2.7.0 on this machine enforces a fixed 14400s runtime cap."
+  echo "      Keep loops scoped to one verified slice and relaunch as needed."
 
   (
     cd "$REPO_ROOT"
@@ -308,25 +314,153 @@ META
 
 status_cmd() {
   require_cmd ralph
-  (cd "$REPO_ROOT" && ralph loops list)
+  (cd "$REPO_ROOT" && ralph -c "$CONFIG_PATH" loops list)
+}
+
+resume_run_cmd() {
+  require_cmd ralph
+  [[ $# -ge 1 ]] || fail "resume-run requires <run-id>"
+
+  local run_id="$1"
+  shift
+  local max_iterations=""
+  local dry_run="0"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --max-iterations)
+        [[ $# -ge 2 ]] || fail "--max-iterations requires a value"
+        max_iterations="$2"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run="1"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "Unknown resume-run option: $1"
+        ;;
+    esac
+  done
+  if [[ -n "$max_iterations" ]] && ! [[ "$max_iterations" =~ ^[0-9]+$ ]]; then
+    fail "--max-iterations must be a positive integer"
+  fi
+
+  local run_dir="$REPO_ROOT/$RUNS_ROOT/$run_id"
+  local launch_file="$run_dir/launch.txt"
+  [[ -f "$launch_file" ]] || fail "Run bundle not found: $run_id"
+
+  local launch_cmd
+  launch_cmd="$(cat "$launch_file")"
+  eval "set -- $launch_cmd"
+  local cmd=()
+  local skip_next="0"
+  for arg in "$@"; do
+    if [[ "$skip_next" == "1" ]]; then
+      skip_next="0"
+      continue
+    fi
+    if [[ "$arg" == "--max-iterations" ]]; then
+      skip_next="1"
+      continue
+    fi
+    cmd+=("$arg")
+  done
+  if [[ -n "$max_iterations" ]]; then
+    cmd+=(--max-iterations "$max_iterations")
+  fi
+  cmd+=(--continue)
+  if [[ "$dry_run" == "1" ]]; then
+    cmd+=(--dry-run)
+  fi
+  launch_cmd="$(printf '%q ' "${cmd[@]}")"
+  launch_cmd="${launch_cmd% }"
+
+  echo "Resuming Ralph run bundle: $run_dir"
+  echo "Launch command:"
+  echo "  $launch_cmd"
+  echo "Note: this Ralph build has a fixed 14400s runtime cap; resume one slice at a time."
+
+  (
+    cd "$REPO_ROOT"
+    "${cmd[@]}"
+  )
+}
+
+doctor_cmd() {
+  require_cmd ralph
+  local workflow="$DEFAULT_WORKFLOW"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --workflow)
+        [[ $# -ge 2 ]] || fail "--workflow requires a value"
+        workflow="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "Unknown doctor option: $1"
+        ;;
+    esac
+  done
+  (cd "$REPO_ROOT" && ralph -c "$CONFIG_PATH" -H "$workflow" doctor)
+}
+
+preflight_cmd() {
+  require_cmd ralph
+  local workflow="$DEFAULT_WORKFLOW"
+  local strict="0"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --workflow)
+        [[ $# -ge 2 ]] || fail "--workflow requires a value"
+        workflow="$2"
+        shift 2
+        ;;
+      --strict)
+        strict="1"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        fail "Unknown preflight option: $1"
+        ;;
+    esac
+  done
+
+  local cmd=(ralph -c "$CONFIG_PATH" -H "$workflow" preflight)
+  if [[ "$strict" == "1" ]]; then
+    cmd+=(--strict)
+  fi
+  (cd "$REPO_ROOT" && "${cmd[@]}")
 }
 
 logs_cmd() {
   require_cmd ralph
   [[ $# -ge 1 ]] || fail "logs requires <loop-id>"
-  (cd "$REPO_ROOT" && ralph loops logs "$@")
+  (cd "$REPO_ROOT" && ralph -c "$CONFIG_PATH" loops logs "$@")
 }
 
 diff_cmd() {
   require_cmd ralph
   [[ $# -ge 1 ]] || fail "diff requires <loop-id>"
-  (cd "$REPO_ROOT" && ralph loops diff "$@")
+  (cd "$REPO_ROOT" && ralph -c "$CONFIG_PATH" loops diff "$@")
 }
 
 attach_cmd() {
   require_cmd ralph
   [[ $# -ge 1 ]] || fail "attach requires <loop-id>"
-  (cd "$REPO_ROOT" && ralph loops attach "$@")
+  (cd "$REPO_ROOT" && ralph -c "$CONFIG_PATH" loops attach "$@")
 }
 
 main() {
@@ -339,6 +473,18 @@ main() {
     start)
       shift
       start_cmd "$@"
+      ;;
+    resume-run)
+      shift
+      resume_run_cmd "$@"
+      ;;
+    doctor)
+      shift
+      doctor_cmd "$@"
+      ;;
+    preflight)
+      shift
+      preflight_cmd "$@"
       ;;
     status)
       shift

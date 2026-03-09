@@ -1,4 +1,3 @@
 # phase	id	slug	max_iterations	task_file	description
-# phases 1-5 are complete and retained as archived task specs under tools/ralph-loop/tasks/
-6	linux-cutover-and-oracle-retention	linux-cutover-and-oracle-retention	60	tools/ralph-loop/tasks/phase-6-linux-cutover-and-oracle-retention.md	Cut Linux over to the Rust binary, keep C as hidden oracle infrastructure, and tighten CI/release gates.
-7	windows-runtime-port	windows-runtime-port	90	tools/ralph-loop/tasks/phase-7-windows-runtime-port.md	Port the deferred Windows runtime and service layer after Linux cutover is green.
+# completed phases remain archived under tools/ralph-loop/tasks/
+meta	remaining-full-migration	remaining-full-migration	90	tools/ralph-loop/tasks/remaining-full-migration.md	Archive record for the completed byedpi Rust migration; no active phases remain.

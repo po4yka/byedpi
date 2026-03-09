@@ -21,12 +21,10 @@ jobs:
           targets: x86_64-pc-windows-gnu
       - name: Install Linux packet capture and routing tooling
         run: sudo apt-get update && sudo apt-get install -y tcpdump iproute2 iptables mingw-w64
-      - name: Run Linux cutover gates
+      - name: Run Rust-owned Linux cutover gates
         run: make cutover-gates
       - name: Run Windows cross-target Rust check
         run: make test-windows-cross-check
-      - name: Run sanitizer suite
-        run: make test-sanitize
 
   nightly:
     if: github.event_name == 'schedule'
@@ -45,5 +43,6 @@ jobs:
         run: |
           make cutover-gates
           make test-windows-cross-check
-          make test-sanitize
+          make transition-runtime-gates
+          make transition-safety-gates
           make fuzz-packets

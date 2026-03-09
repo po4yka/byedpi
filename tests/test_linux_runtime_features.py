@@ -106,6 +106,7 @@ class ProtectServer:
     def __init__(self, path: Path):
         self.path = path
         self.received_peer: tuple[str, int] | None = None
+        self.received_local: tuple[str, int] | None = None
         self.error: str | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -148,14 +149,23 @@ class ProtectServer:
                     last_error = None
                     while time.time() < deadline:
                         try:
+                            local = dup_sock.getsockname()
+                            if local[1] != 0:
+                                self.received_local = local
+                        except OSError:
+                            pass
+                        try:
                             self.received_peer = dup_sock.getpeername()
+                            local = dup_sock.getsockname()
+                            if local[1] != 0:
+                                self.received_local = local
                             break
                         except OSError as exc:
                             last_error = str(exc)
                             time.sleep(0.05)
-                    if self.received_peer is None:
+                    if self.received_peer is None and self.received_local is None:
                         raise AssertionError(
-                            f"protect helper did not observe connected peer: {last_error}"
+                            f"protect helper did not observe socket state: {last_error}"
                         )
                 finally:
                     dup_sock.close()
@@ -321,7 +331,12 @@ class LinuxProtectPathTests(unittest.TestCase):
         return server
 
     def test_protect_path_receives_outbound_socket_fd(self) -> None:
-        echo_server = self._start_server(ThreadingTCPServer(("127.0.0.1", 0), EchoHandler))
+        class RecordingEchoHandler(EchoHandler):
+            def handle(self) -> None:
+                self.server.last_client_address = self.client_address
+                super().handle()
+
+        echo_server = self._start_server(ThreadingTCPServer(("127.0.0.1", 0), RecordingEchoHandler))
         path = Path(self._tmpdir.name) / "protect.sock"
         protect = ProtectServer(path)
         protect.start()
@@ -338,8 +353,10 @@ class LinuxProtectPathTests(unittest.TestCase):
             protect.stop()
 
         self.assertIsNone(protect.error, protect.error)
-        self.assertIsNotNone(protect.received_peer)
-        self.assertEqual(protect.received_peer[1], echo_server.server_address[1])
+        self.assertIsNotNone(protect.received_local)
+        self.assertEqual(protect.received_local[1], echo_server.last_client_address[1])
+        if protect.received_peer is not None:
+            self.assertEqual(protect.received_peer[1], echo_server.server_address[1])
 
 
 @unittest.skipUnless(TransparentLab.supported(), "transparent proxy test requires Linux netns, iptables, and passwordless sudo")

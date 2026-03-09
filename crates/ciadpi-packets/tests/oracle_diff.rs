@@ -1,6 +1,4 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::OnceLock;
 
 use ciadpi_packets::{
     change_tls_sni_seeded_like_c, is_http_redirect, mod_http_like_c, parse_http, parse_tls,
@@ -9,44 +7,33 @@ use ciadpi_packets::{
 };
 use serde_json::Value;
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .to_path_buf()
+#[allow(dead_code)]
+#[path = "../../../tests/rust_packet_seeds.rs"]
+mod rust_packet_seeds;
+
+fn fixtures() -> &'static Value {
+    static FIXTURES: OnceLock<Value> = OnceLock::new();
+    FIXTURES.get_or_init(|| {
+        serde_json::from_str(include_str!(
+            "../../../tests/corpus/rust-fixtures/packets_oracle.json"
+        ))
+        .expect("packet fixtures")
+    })
 }
 
-fn corpus_path(name: &str) -> PathBuf {
-    repo_root().join("tests").join("corpus").join("packets").join(name)
-}
-
-fn oracle_bin() -> PathBuf {
-    repo_root().join("tests").join("bin").join("oracle_packets")
-}
-
-fn run_oracle(args: &[&str]) -> Value {
-    let oracle = oracle_bin();
-    assert!(
-        oracle.exists(),
-        "missing packet oracle at {}. Run `make oracles` first.",
-        oracle.display()
-    );
-    let output = Command::new(&oracle)
-        .args(args)
-        .output()
-        .expect("oracle invocation");
-    assert!(
-        output.status.success(),
-        "oracle failed: {}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).expect("oracle json")
+fn fixture(case: &str) -> &'static Value {
+    &fixtures()[case]
 }
 
 fn read_corpus(name: &str) -> Vec<u8> {
-    fs::read(corpus_path(name)).expect("corpus file")
+    match name {
+        "http_request.bin" => rust_packet_seeds::http_request(),
+        "http_redirect_response.bin" => rust_packet_seeds::http_redirect_response(),
+        "tls_client_hello.bin" => rust_packet_seeds::tls_client_hello(),
+        "tls_client_hello_ech.bin" => rust_packet_seeds::tls_client_hello_ech(),
+        "tls_server_hello_like.bin" => rust_packet_seeds::tls_server_hello_like(),
+        other => panic!("unexpected corpus file: {other}"),
+    }
 }
 
 fn hex(data: &[u8]) -> String {
@@ -59,130 +46,104 @@ fn hex(data: &[u8]) -> String {
     out
 }
 
-fn path_arg(path: &Path) -> &str {
-    path.to_str().expect("utf-8 path")
-}
-
 #[test]
-fn parse_http_matches_oracle() {
-    let path = corpus_path("http_request.bin");
-    let oracle = run_oracle(&["parse_http", path_arg(&path)]);
+fn parse_http_matches_fixture() {
+    let expected = fixture("parse_http");
     let data = read_corpus("http_request.bin");
     let parsed = parse_http(&data).expect("rust parse_http");
 
-    assert_eq!(oracle["ok"], Value::Bool(true));
-    assert_eq!(parsed.host, oracle["host"].as_str().unwrap().as_bytes());
-    assert_eq!(parsed.port, oracle["port"].as_u64().unwrap() as u16);
+    assert_eq!(parsed.host, expected["host"].as_str().unwrap().as_bytes());
+    assert_eq!(parsed.port, expected["port"].as_u64().unwrap() as u16);
 }
 
 #[test]
-fn parse_tls_matches_oracle() {
-    let path = corpus_path("tls_client_hello.bin");
-    let oracle = run_oracle(&["parse_tls", path_arg(&path)]);
+fn parse_tls_matches_fixture() {
     let data = read_corpus("tls_client_hello.bin");
     let parsed = parse_tls(&data).expect("rust parse_tls");
 
-    assert_eq!(oracle["ok"], Value::Bool(true));
-    assert_eq!(parsed, oracle["host"].as_str().unwrap().as_bytes());
+    assert_eq!(
+        parsed,
+        fixture("parse_tls")["host"].as_str().unwrap().as_bytes()
+    );
 }
 
 #[test]
-fn http_redirect_matches_oracle() {
-    let req_path = corpus_path("http_request.bin");
-    let resp_path = corpus_path("http_redirect_response.bin");
-    let oracle = run_oracle(&[
-        "is_http_redirect",
-        path_arg(&req_path),
-        path_arg(&resp_path),
-    ]);
+fn http_redirect_matches_fixture() {
     let req = read_corpus("http_request.bin");
     let resp = read_corpus("http_redirect_response.bin");
-    assert_eq!(Value::Bool(is_http_redirect(&req, &resp)), oracle["ok"]);
+    assert_eq!(
+        is_http_redirect(&req, &resp),
+        fixture("http_redirect")["ok"].as_bool().unwrap()
+    );
 }
 
 #[test]
-fn tls_session_id_mismatch_matches_oracle() {
-    let req_path = corpus_path("tls_client_hello.bin");
-    let resp_path = corpus_path("tls_server_hello_like.bin");
-    let oracle = run_oracle(&["neq_tls_sid", path_arg(&req_path), path_arg(&resp_path)]);
+fn tls_session_id_mismatch_matches_fixture() {
     let req = read_corpus("tls_client_hello.bin");
     let resp = read_corpus("tls_server_hello_like.bin");
-    assert_eq!(Value::Bool(tls_session_id_mismatch(&req, &resp)), oracle["ok"]);
+    assert_eq!(
+        tls_session_id_mismatch(&req, &resp),
+        fixture("tls_session_id_mismatch")["ok"].as_bool().unwrap()
+    );
 }
 
 #[test]
-fn mod_http_matches_oracle() {
-    let path = corpus_path("http_request.bin");
-    let oracle = run_oracle(&["mod_http", path_arg(&path), "3"]);
+fn mod_http_matches_fixture() {
+    let expected = fixture("mod_http_hmix_space");
     let data = read_corpus("http_request.bin");
     let rust = mod_http_like_c(&data, MH_HMIX | MH_SPACE);
 
-    assert_eq!(rust.rc, oracle["rc"].as_i64().unwrap() as isize);
-    assert_eq!(hex(&rust.bytes), oracle["hex"].as_str().unwrap());
+    assert_eq!(rust.rc, expected["rc"].as_i64().unwrap() as isize);
+    assert_eq!(hex(&rust.bytes), expected["hex"].as_str().unwrap());
 }
 
 #[test]
-fn part_tls_matches_oracle() {
-    let path = corpus_path("tls_client_hello.bin");
-    let oracle = run_oracle(&["part_tls", path_arg(&path), "32"]);
+fn part_tls_matches_fixture() {
+    let expected = fixture("part_tls_32");
     let data = read_corpus("tls_client_hello.bin");
     let rust = part_tls_like_c(&data, 32);
 
-    assert_eq!(rust.rc, oracle["rc"].as_i64().unwrap() as isize);
-    assert_eq!(hex(&rust.bytes), oracle["hex"].as_str().unwrap());
+    assert_eq!(rust.rc, expected["rc"].as_i64().unwrap() as isize);
+    assert_eq!(hex(&rust.bytes), expected["hex"].as_str().unwrap());
 }
 
 #[test]
-fn change_tls_sni_matches_oracle() {
-    let path = corpus_path("tls_client_hello_ech.bin");
+fn change_tls_sni_matches_fixture() {
+    let expected = fixture("change_tls_sni_grow");
     let data = read_corpus("tls_client_hello_ech.bin");
     let capacity = data.len() + 64;
-    let oracle = run_oracle(&[
-        "change_tls_sni",
-        path_arg(&path),
-        "docs.example.test",
-        &capacity.to_string(),
-    ]);
     let rust = change_tls_sni_seeded_like_c(&data, b"docs.example.test", capacity, 1);
 
-    assert_eq!(rust.rc, oracle["rc"].as_i64().unwrap() as isize);
-    assert_eq!(hex(&rust.bytes), oracle["hex"].as_str().unwrap());
+    assert_eq!(rust.rc, expected["rc"].as_i64().unwrap() as isize);
+    assert_eq!(hex(&rust.bytes), expected["hex"].as_str().unwrap());
 }
 
 #[test]
-fn change_tls_sni_shrink_matches_oracle() {
-    let path = corpus_path("tls_client_hello_ech.bin");
+fn change_tls_sni_shrink_matches_fixture() {
+    let expected = fixture("change_tls_sni_shrink");
     let data = read_corpus("tls_client_hello_ech.bin");
-    let oracle = run_oracle(&[
-        "change_tls_sni",
-        path_arg(&path),
-        "a.docs.example.test",
-        &data.len().to_string(),
-    ]);
     let rust = change_tls_sni_seeded_like_c(&data, b"a.docs.example.test", data.len(), 1);
 
-    assert_eq!(rust.rc, oracle["rc"].as_i64().unwrap() as isize);
-    assert_eq!(hex(&rust.bytes), oracle["hex"].as_str().unwrap());
+    assert_eq!(rust.rc, expected["rc"].as_i64().unwrap() as isize);
+    assert_eq!(hex(&rust.bytes), expected["hex"].as_str().unwrap());
 }
 
 #[test]
-fn randomize_tls_matches_deterministic_oracle() {
-    let path = corpus_path("tls_client_hello.bin");
-    let oracle = run_oracle(&["randomize_tls_seeded", path_arg(&path), "7"]);
+fn randomize_tls_matches_deterministic_fixture() {
+    let expected = fixture("randomize_tls_seeded");
     let data = read_corpus("tls_client_hello.bin");
     let rust = randomize_tls_seeded_like_c(&data, 7);
 
-    assert_eq!(rust.rc, oracle["rc"].as_i64().unwrap() as isize);
-    assert_eq!(hex(&rust.bytes), oracle["hex"].as_str().unwrap());
+    assert_eq!(rust.rc, expected["rc"].as_i64().unwrap() as isize);
+    assert_eq!(hex(&rust.bytes), expected["hex"].as_str().unwrap());
 }
 
 #[test]
-fn mod_http_dmix_matches_oracle() {
-    let path = corpus_path("http_request.bin");
-    let oracle = run_oracle(&["mod_http", path_arg(&path), "7"]);
+fn mod_http_dmix_matches_fixture() {
+    let expected = fixture("mod_http_hmix_space_dmix");
     let data = read_corpus("http_request.bin");
     let rust = mod_http_like_c(&data, MH_HMIX | MH_SPACE | MH_DMIX);
 
-    assert_eq!(rust.rc, oracle["rc"].as_i64().unwrap() as isize);
-    assert_eq!(hex(&rust.bytes), oracle["hex"].as_str().unwrap());
+    assert_eq!(rust.rc, expected["rc"].as_i64().unwrap() as isize);
+    assert_eq!(hex(&rust.bytes), expected["hex"].as_str().unwrap());
 }

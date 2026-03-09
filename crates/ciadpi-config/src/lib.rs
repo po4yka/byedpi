@@ -6,9 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use ciadpi_packets::{
-    IS_HTTP, IS_HTTPS, IS_IPV4, IS_TCP, IS_UDP, MH_DMIX, MH_HMIX, MH_SPACE,
-};
+use ciadpi_packets::{IS_HTTP, IS_HTTPS, IS_IPV4, IS_TCP, IS_UDP, MH_DMIX, MH_HMIX, MH_SPACE};
 
 pub const VERSION: &str = "17.3";
 
@@ -357,13 +355,21 @@ fn parse_ip_token(token: &str) -> Result<Cidr, ConfigError> {
         }
         None => (token, 0),
     };
-    let addr = IpAddr::from_str(addr_str).map_err(|_| ConfigError::invalid("--ipset", Some(token)))?;
+    let addr =
+        IpAddr::from_str(addr_str).map_err(|_| ConfigError::invalid("--ipset", Some(token)))?;
     let max_bits = match addr {
         IpAddr::V4(_) => 32,
         IpAddr::V6(_) => 128,
     };
-    let bits = if bits == 0 || bits > max_bits { max_bits } else { bits };
-    Ok(Cidr { addr, bits: bits as u8 })
+    let bits = if bits == 0 || bits > max_bits {
+        max_bits
+    } else {
+        bits
+    };
+    Ok(Cidr {
+        addr,
+        bits: bits as u8,
+    })
 }
 
 pub fn parse_ipset_spec(spec: &str) -> Result<Vec<Cidr>, ConfigError> {
@@ -421,7 +427,8 @@ pub fn data_from_str(spec: &str) -> Result<Vec<u8>, ConfigError> {
             }
         }
         let mut oct_end = idx;
-        while oct_end < bytes.len() && oct_end < idx + 3 && (b'0'..=b'7').contains(&bytes[oct_end]) {
+        while oct_end < bytes.len() && oct_end < idx + 3 && (b'0'..=b'7').contains(&bytes[oct_end])
+        {
             oct_end += 1;
         }
         if oct_end > idx {
@@ -474,7 +481,9 @@ fn parse_numeric_addr(spec: &str) -> Result<(IpAddr, Option<u16>), ConfigError> 
         let colon_count = spec.bytes().filter(|&byte| byte == b':').count();
         if colon_count == 1 {
             match spec.rsplit_once(':') {
-                Some((host, port_str)) if !port_str.is_empty() && port_str.as_bytes()[0].is_ascii_digit() => {
+                Some((host, port_str))
+                    if !port_str.is_empty() && port_str.as_bytes()[0].is_ascii_digit() =>
+                {
                     let port = port_str
                         .parse::<u16>()
                         .map_err(|_| ConfigError::invalid("address", Some(spec)))?;
@@ -586,7 +595,11 @@ fn split_plugin_options(spec: &str) -> Vec<String> {
         .collect()
 }
 
-fn next_value<'a>(args: &'a [String], idx: &mut usize, option: &str) -> Result<&'a str, ConfigError> {
+fn next_value<'a>(
+    args: &'a [String],
+    idx: &mut usize,
+    option: &str,
+) -> Result<&'a str, ConfigError> {
     *idx += 1;
     args.get(*idx)
         .map(String::as_str)
@@ -828,7 +841,8 @@ pub fn parse_cli(args: &[String], startup: &StartupEnv) -> Result<ParseResult, C
                 let text = String::from_utf8_lossy(&data);
                 group!().filters.ipset.extend(parse_ipset_spec(&text)?);
             }
-            "-s" | "--split" | "-d" | "--disorder" | "-o" | "--oob" | "-q" | "--disoob" | "-f" | "--fake" => {
+            "-s" | "--split" | "-d" | "--disorder" | "-o" | "--oob" | "-q" | "--disoob" | "-f"
+            | "--fake" => {
                 let value = next_value(&effective_args, &mut idx, arg)?;
                 let offset = parse_offset_expr(value)?;
                 let mode = match arg.as_str() {
@@ -863,7 +877,9 @@ pub fn parse_cli(args: &[String], startup: &StartupEnv) -> Result<ParseResult, C
                         Some('m') => {
                             let (_, val) = token
                                 .split_once('=')
-                                .or_else(|| token.strip_prefix("msize=").map(|rest| ("msize", rest)))
+                                .or_else(|| {
+                                    token.strip_prefix("msize=").map(|rest| ("msize", rest))
+                                })
                                 .ok_or_else(|| ConfigError::invalid(arg, Some(value)))?;
                             group!().fake_tls_size = val
                                 .parse::<i32>()
@@ -1022,7 +1038,9 @@ fn common_suffix_match(host: &str, rule: &str) -> bool {
 
 impl FilterSet {
     pub fn hosts_match(&self, host: &str) -> bool {
-        self.hosts.iter().any(|rule| common_suffix_match(host, rule))
+        self.hosts
+            .iter()
+            .any(|rule| common_suffix_match(host, rule))
     }
 
     pub fn ipset_match(&self, ip: IpAddr) -> bool {
@@ -1033,8 +1051,12 @@ impl FilterSet {
 impl Cidr {
     pub fn matches(&self, ip: IpAddr) -> bool {
         match (self.addr, ip) {
-            (IpAddr::V4(lhs), IpAddr::V4(rhs)) => prefix_match(&lhs.octets(), &rhs.octets(), self.bits),
-            (IpAddr::V6(lhs), IpAddr::V6(rhs)) => prefix_match(&lhs.octets(), &rhs.octets(), self.bits),
+            (IpAddr::V4(lhs), IpAddr::V4(rhs)) => {
+                prefix_match(&lhs.octets(), &rhs.octets(), self.bits)
+            }
+            (IpAddr::V6(lhs), IpAddr::V6(rhs)) => {
+                prefix_match(&lhs.octets(), &rhs.octets(), self.bits)
+            }
             _ => false,
         }
     }
@@ -1088,7 +1110,8 @@ pub fn load_cache_entries(text: &str) -> Vec<CacheEntry> {
 }
 
 pub fn load_cache_entries_from_path(path: &Path) -> Result<Vec<CacheEntry>, ConfigError> {
-    let text = fs::read_to_string(path).map_err(|_| ConfigError::invalid("cache-file", Some(path.display().to_string())))?;
+    let text = fs::read_to_string(path)
+        .map_err(|_| ConfigError::invalid("cache-file", Some(path.display().to_string())))?;
     Ok(load_cache_entries(&text))
 }
 

@@ -10,36 +10,44 @@ ciadpi --fake -1 --ttl 8
 ### Testing
 ```
 make test
-make test-sanitize
+make transition-safety-gates
 make fuzz-packets
 ```
 
 - `make test` runs corpus-backed `packets.c` regressions plus black-box SOCKS/HTTP CONNECT/TLS proxy tests
 - `make test` also runs runtime parity checks for AUTO/cache promotion and reuse, cache-backed connect fallback, `redirect`, `ssl_err`, and `torst` replay behavior, plus partial-TLS timeout count and byte-limit handling
-- `make test` also runs desync runtime regression checks against oracle output and Linux loopback packet-capture checks for staged send and `--wait-send` / `--await-int` behavior when `tcpdump` is available
-- `make test` also runs Linux routed namespace tests for `fake`, `md5sig`, and `drop-sack` when `ip netns` and passwordless `sudo` are available
 - `make test` also runs Linux socket-feature tests for `--transparent` and `--protect-path` when the required namespace and packet-filter tooling is available
-- `make test` builds the Rust `ciadpi` artifact, runs the Rust oracle-diff suites, and checks the default `ciadpi` binary against the hidden C oracle runtime for `--help`, `--version`, and parse-failure parity
-- `make test` runs the Linux desync runtime, auto-trigger parity, routed namespace, and transparent/protect-path socket-feature suites against the default Rust `ciadpi` binary
+- `make test` builds the Rust `ciadpi` artifact and runs the Rust-owned workspace/unit coverage (`cargo test --workspace --lib --bins`, the committed-fixture `oracle_diff` integrations, `ciadpi-bin` CLI integration, and desync action planning) without compiling hidden C oracle helpers
+- `make test` runs the AUTO/cache runtime parity, transparent/protect-path socket-feature suite, Rust-only proxy subset, and runtime-migration coverage against the default Rust `ciadpi` binary
 - `make test` also runs a Rust-only proxy subset for SOCKS4, SOCKS5 CONNECT, SOCKS5 UDP associate, HTTP CONNECT, UDP fake bursts, TLS tunnel relay, churn, no-domain/no-udp rejection, connect failure handling, SOCKS chaining, and IPv6 where available
 - `make test` also runs Rust runtime-migration coverage for pidfile handling, TCP Fast Open, delayed connect, cache stdout dumping, max-conn admission, and Shadowsocks env startup
+- `make test-transition-runtime` keeps the remaining heavy Linux runtime coverage explicit: `test-desync-runtime` now uses committed Rust-owned desync fixtures for its `mod-http`/`tlsminor`/`tlsrec` stream assertions and stays explicit only because it retains the heavier live socket and tcpdump coverage, while `test-linux-routed-runtime` stays explicit because its namespace preflight is environment-sensitive
 - `make test-install-cutover` verifies that `make install` ships only the Rust `ciadpi` binary and keeps the hidden C oracle out of the installed artifact set
-- `make test-windows-cross-check` cross-links the Rust workspace test binaries for `x86_64-pc-windows-gnu` so deferred Windows port regressions fail before runtime work starts
-- `make cutover-gates` runs `make test` plus the packet benchmark smoke gate required for the Linux cutover
-- `make test-sanitize` reruns those tests with AddressSanitizer and UndefinedBehaviorSanitizer
+- `make test-windows-cross-check` cross-links the Rust workspace test binaries for `x86_64-pc-windows-gnu`, including Windows service parity tests for service name, control handling, saved-argument reuse, working-directory reset, and exit-code propagation, so regressions fail before native Windows runner coverage is added
+- `make cutover-gates` runs the Rust-owned default gates: `make test`, `make test-install-cutover`, and the packet benchmark smoke gate required for the Linux cutover
+- `make transition-runtime-gates` now runs only the explicit Rust-owned Linux runtime transition gates (`test-desync-runtime` and `test-linux-routed-runtime`)
+- `make transition-safety-gates` replaces the retired legacy C sanitizer lane with Rust-owned safety coverage for packet parsing (`cargo test -p ciadpi-packets`), proxy integration, and desync runtime smoke
 - `make fuzz-packets` runs a standalone mutation-based fuzz smoke test over the packet corpus
 
 ### Ralph Loop Migration
 ```
+scripts/ralph-rust-migration doctor
+scripts/ralph-rust-migration preflight
 scripts/ralph-rust-migration list
-scripts/ralph-rust-migration dry-run all
-scripts/ralph-rust-migration start task linux-cutover-and-oracle-retention
+scripts/ralph-rust-migration dry-run full
+scripts/ralph-rust-migration start full
 ```
 
-- Repo-local Ralph loop infrastructure for the remaining Rust cutover backlog lives under `tools/ralph-loop/`
-- `scripts/ralph-rust-migration` defaults to the `codex` backend and manual merge mode for the remaining cutover tasks
+- Repo-local Ralph loop infrastructure for the remaining migration backlog lives under `tools/ralph-loop/`
+- The repo root now contains `ralph.yml` and `PROMPT.md`, so upstream `ralph` commands also work directly from this checkout
+- `scripts/ralph-rust-migration` defaults to the `codex` backend, `builtin:feature`, and manual merge mode for the remaining migration tasks
+- The installed Ralph 2.7.0 CLI on this machine has a fixed 14400-second runtime cap, so the intended operating mode is one verified relaunchable slice per loop
 - Completed phase specs for the runtime-policy, daemon/pidfile/TFO, delayed-connect/cache-stdout, connection-limit/Shadowsocks, and staged-send/timeout work are kept under `tools/ralph-loop/tasks/` as archived migration records
-- The remaining Ralph tasks are Linux cutover/oracle retention and the deferred Windows runtime port
+- The byedpi Rust migration backlog is now archived; phase 7 (`windows-runtime-port`) and phase 8 (`rust-only-final-cutover`) are retained under `tools/ralph-loop/tasks/` as closeout records
+- The final explicit gate layout is Rust-owned: `make transition-runtime-gates` keeps the heavy Linux runtime suites explicit, while `make transition-safety-gates` provides the Rust-owned packet/proxy/desync safety smoke
+- `test-desync-runtime` and `test-linux-routed-runtime` both remain explicit Rust-owned Linux runtime gates for now because they are heavier and environment-sensitive, not because they still depend on hidden C
+- The dead C oracle helpers, the old Windows C service helper, and the unreferenced root-level legacy C runtime sources have been retired; the residual C surface is now limited to the packet-fixture/tooling files that still back `tests/test_packets.c`, `make fuzz-packets`, and the packet corpus tooling
+- The retired closeout aliases (`make test-transition-oracles`, `make transition-oracle-gates`, `make test-sanitize`, and `make transition-c-sanitize-gates`) have been removed; the supported explicit gate names are now only `make test-transition-runtime`, `make transition-runtime-gates`, and `make transition-safety-gates`
 - Task specs, prompts, and launch details are documented in `tools/ralph-loop/README.md`
 
 ------
@@ -366,10 +374,10 @@ TCP может отсылать данные вне основного пото�
 ------
 ### Сборка
 Для сборки понадобится: 
-`make`, `gcc/clang` для Linux, `mingw` для Windows  
+`make`, `gcc/clang` для Linux, `rustup` и `mingw` для Windows cross-build  
 
 * Linux: `make`
-* Windows: `make windows CC=x86_64-w64-mingw32-gcc`
+* Windows: `make windows WINDOWS_TARGET=x86_64-pc-windows-gnu`
 
 ------
 ### Docker образ

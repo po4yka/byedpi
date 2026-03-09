@@ -1,0 +1,39 @@
+# Ralph Orchestrator Configuration for byedpi
+# Docs: https://github.com/mikeyobrien/ralph-orchestrator
+
+cli:
+  backend: "codex"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 90
+  max_runtime_seconds: 21600
+  idle_timeout_secs: 1800
+
+core:
+  scratchpad: ".ralph/agent/scratchpad.md"
+  specs_dir: ".ralph/specs/"
+  guardrails:
+    - "Complete the remaining byedpi C-to-Rust migration without regressing Linux parity."
+    - "Treat the existing C implementation as the oracle until the active task explicitly retires it."
+    - "Do not weaken or delete tests to make migration work; extend or replace coverage before removing old paths."
+    - "Preserve the public ciadpi CLI, startup env contract, cache format, and network-visible behavior unless the task file explicitly changes them."
+    - "Keep ciadpi-packets, ciadpi-config, ciadpi-session, and ciadpi-desync in safe Rust; contain any platform-specific unsafe to ciadpi-bin glue with documented safety."
+    - "Run the verification listed in the task file before printing LOOP_COMPLETE."
+
+features:
+  parallel: true
+  auto_merge: false
+  preflight:
+    enabled: true
+    strict: false
+    skip: []
+
+memories:
+  enabled: true
+  inject: auto
+  budget: 2000
+
+tasks:
+  enabled: true

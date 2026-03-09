@@ -10,10 +10,14 @@ Run metadata:
 
 Execution requirements:
 1. Read {{TASK_FILE}} first.
-2. Read any `AGENTS.md` files you encounter and follow them. If none exist, follow the repository's existing conventions and test strategy.
-3. Treat the C implementation as the behavior oracle unless the task explicitly changes that rule.
-4. Keep changes scoped to the task; avoid unrelated refactors.
-5. Run the verification steps listed in {{TASK_FILE}} before completion. If they are not enough for the touched files, add the narrowest extra verification needed.
-6. Keep or expand the current contract, oracle-diff, and runtime parity coverage. Do not delete tests to make the task pass.
-7. If blocked, explain the blocker and the next concrete action.
-8. When complete and verified, print exactly: LOOP_COMPLETE
+2. Read `tools/ralph-loop/tasks/byedpi-rust-migration.tsv` and identify where this task sits in the active backlog.
+3. Read any `AGENTS.md` files you encounter and follow them. If none exist, follow the repository's existing conventions and test strategy.
+4. Use `ralph tools task` to manage the concrete substeps for the current loop.
+5. Treat the C implementation as the behavior oracle unless the task explicitly changes that rule.
+6. Keep changes scoped to the task; avoid unrelated refactors.
+7. Ralph 2.7.0 on this machine stops after 14400 seconds. Complete one verified slice, update the backlog, and stop cleanly instead of burning the full runtime budget.
+8. Run the verification steps listed in {{TASK_FILE}} before completion. If they are not enough for the touched files, add the narrowest extra verification needed.
+9. Keep or expand the current contract, oracle-diff, and runtime parity coverage. Do not delete tests to make the task pass.
+10. If you complete or supersede a manifest entry, update the task docs or manifest so the backlog stays accurate.
+11. If blocked, explain the blocker and the next concrete action.
+12. When complete and verified, print exactly: LOOP_COMPLETE

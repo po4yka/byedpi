@@ -10,9 +10,11 @@
 
 - Active Rust workspace crates: `ciadpi-packets`, `ciadpi-config`, `ciadpi-session`, `ciadpi-desync`, `ciadpi-bin`
 - Current Rust binary target: `ciadpi`
-- Current C runtime is retained as hidden oracle infrastructure during the Linux cutover window
+- Active migration manifest: `tools/ralph-loop/tasks/byedpi-rust-migration.tsv`
+- Current C runtime is retained only until the active backlog explicitly retires it
 - Coverage spec: `tests/coverage_map.md`
 - Scratchpad: `{{SCRATCHPAD_PATH}}`
 - Ralph specs directory: `{{SPECS_DIR}}`
+- Installed Ralph 2.7.0 on this machine enforces a fixed 14400-second max runtime, so the task must complete one verified slice and stop cleanly for relaunch
 
 ## Requested Task

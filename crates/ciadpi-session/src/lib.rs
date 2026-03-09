@@ -2,7 +2,9 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use ciadpi_packets::{is_http_redirect, is_tls_client_hello, is_tls_server_hello, tls_session_id_mismatch};
+use ciadpi_packets::{
+    is_http_redirect, is_tls_client_hello, is_tls_server_hello, tls_session_id_mismatch,
+};
 
 pub const S_AUTH_NONE: u8 = 0x00;
 pub const S_AUTH_BAD: u8 = 0xff;
@@ -182,7 +184,10 @@ impl SessionError {
 }
 
 fn read_be_u16(data: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_be_bytes([*data.get(offset)?, *data.get(offset + 1)?]))
+    Some(u16::from_be_bytes([
+        *data.get(offset)?,
+        *data.get(offset + 1)?,
+    ]))
 }
 
 pub fn parse_socks4_request(
@@ -221,7 +226,8 @@ pub fn parse_socks4_request(
         if !(3..=255).contains(&len) {
             return Err(SessionError::generic());
         }
-        let domain = std::str::from_utf8(&buffer[domain_start..domain_end]).map_err(|_| SessionError::generic())?;
+        let domain = std::str::from_utf8(&buffer[domain_start..domain_end])
+            .map_err(|_| SessionError::generic())?;
         resolver
             .resolve(domain, SocketType::Stream)
             .map(|addr| TargetAddr {
@@ -252,10 +258,17 @@ pub fn parse_socks5_request(
                 return Err(SessionError::socks5(S_ER_GEN));
             }
             let ip = Ipv4Addr::new(buffer[4], buffer[5], buffer[6], buffer[7]);
-            (TargetAddr { addr: SocketAddr::new(IpAddr::V4(ip), 0) }, S_SIZE_I4)
+            (
+                TargetAddr {
+                    addr: SocketAddr::new(IpAddr::V4(ip), 0),
+                },
+                S_SIZE_I4,
+            )
         }
         S_ATP_ID => {
-            let name_len = *buffer.get(4).ok_or_else(|| SessionError::socks5(S_ER_GEN))? as usize;
+            let name_len = *buffer
+                .get(4)
+                .ok_or_else(|| SessionError::socks5(S_ER_GEN))? as usize;
             let offset = name_len + S_SIZE_ID;
             if buffer.len() < offset {
                 return Err(SessionError::socks5(S_ER_GEN));
@@ -302,7 +315,9 @@ pub fn parse_socks5_request(
     };
     match buffer[1] {
         S_CMD_CONN => Ok(ClientRequest::Socks5Connect(target)),
-        S_CMD_AUDP if socket_type == SocketType::Datagram => Ok(ClientRequest::Socks5UdpAssociate(target)),
+        S_CMD_AUDP if socket_type == SocketType::Datagram => {
+            Ok(ClientRequest::Socks5UdpAssociate(target))
+        }
         S_CMD_AUDP => Ok(ClientRequest::Socks5UdpAssociate(target)),
         _ => Err(SessionError::socks5(S_ER_CMD)),
     }
@@ -338,7 +353,16 @@ fn split_host_port(value: &str) -> Option<(&str, u16)> {
 }
 
 pub fn encode_socks4_reply(success: bool) -> ProxyReply {
-    ProxyReply::Socks4(vec![0, if success { S4_OK } else { S4_ER }, 0, 0, 0, 0, 0, 0])
+    ProxyReply::Socks4(vec![
+        0,
+        if success { S4_OK } else { S4_ER },
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ])
 }
 
 pub fn encode_socks5_reply(code: u8, addr: SocketAddr) -> ProxyReply {

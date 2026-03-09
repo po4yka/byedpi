@@ -1,5 +1,3 @@
-use std::fs;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use ciadpi_packets::{
@@ -7,16 +5,17 @@ use ciadpi_packets::{
     randomize_tls_seeded_like_c, MH_HMIX, MH_SPACE,
 };
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .to_path_buf()
-}
+#[allow(dead_code)]
+#[path = "../../../tests/rust_packet_seeds.rs"]
+mod rust_packet_seeds;
 
 fn read_corpus(name: &str) -> Vec<u8> {
-    fs::read(repo_root().join("tests").join("corpus").join("packets").join(name)).expect("corpus file")
+    match name {
+        "http_request.bin" => rust_packet_seeds::http_request(),
+        "tls_client_hello.bin" => rust_packet_seeds::tls_client_hello(),
+        "tls_client_hello_ech.bin" => rust_packet_seeds::tls_client_hello_ech(),
+        other => panic!("unexpected corpus file: {other}"),
+    }
 }
 
 #[test]
@@ -40,6 +39,9 @@ fn benchmark_smoke() {
             .len();
     }
 
-    eprintln!("packet benchmark smoke: {:?}, checksum={checksum}", start.elapsed());
+    eprintln!(
+        "packet benchmark smoke: {:?}, checksum={checksum}",
+        start.elapsed()
+    );
     assert!(checksum > 0);
 }

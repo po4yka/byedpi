@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use socket2::SockRef;
 
+use super::TcpStageWait;
+
 #[repr(C)]
 struct TcpMd5Sig {
     addr: libc::sockaddr_storage,
@@ -105,7 +107,10 @@ pub fn protect_socket<T: AsRawFd>(socket: &T, path: &str) -> io::Result<()> {
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
         (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as usize;
-        ptr::write(libc::CMSG_DATA(cmsg).cast::<libc::c_int>(), socket.as_raw_fd());
+        ptr::write(
+            libc::CMSG_DATA(cmsg).cast::<libc::c_int>(),
+            socket.as_raw_fd(),
+        );
         msg.msg_controllen = libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) as usize;
         if libc::sendmsg(stream.as_raw_fd(), &msg, 0) < 0 {
             return Err(io::Error::last_os_error());
@@ -251,8 +256,7 @@ pub fn send_fake_tcp(
     ttl: u8,
     md5sig: bool,
     default_ttl: u8,
-    wait_send: bool,
-    await_interval: Duration,
+    wait: TcpStageWait,
 ) -> io::Result<()> {
     if original_prefix.is_empty() {
         return Ok(());
@@ -282,7 +286,8 @@ pub fn send_fake_tcp(
         };
         // SAFETY: `iov` references an anonymous writable mapping whose lifetime
         // extends until after the splice completes.
-        let queued = unsafe { libc::vmsplice(pipe_fds[1], &iov, 1, libc::SPLICE_F_GIFT as libc::c_uint) };
+        let queued =
+            unsafe { libc::vmsplice(pipe_fds[1], &iov, 1, libc::SPLICE_F_GIFT as libc::c_uint) };
         if queued < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -319,7 +324,7 @@ pub fn send_fake_tcp(
             moved += chunk as usize;
         }
 
-        wait_tcp_stage_fd(fd, wait_send, await_interval)?;
+        wait_tcp_stage_fd(fd, wait.0, wait.1)?;
         if md5sig {
             set_tcp_md5sig(stream, 0)?;
         }
@@ -365,7 +370,13 @@ fn peer_addr(fd: libc::c_int) -> io::Result<libc::sockaddr_storage> {
     // `len` bytes into it for the valid socket descriptor `fd`.
     let mut storage = unsafe { zeroed::<libc::sockaddr_storage>() };
     let mut len = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    let rc = unsafe { libc::getpeername(fd, (&mut storage as *mut libc::sockaddr_storage).cast(), &mut len) };
+    let rc = unsafe {
+        libc::getpeername(
+            fd,
+            (&mut storage as *mut libc::sockaddr_storage).cast(),
+            &mut len,
+        )
+    };
     if rc == 0 {
         Ok(storage)
     } else {
@@ -377,14 +388,17 @@ fn storage_to_socket_addr(storage: &libc::sockaddr_storage) -> io::Result<Socket
     match i32::from(storage.ss_family) {
         libc::AF_INET => {
             // SAFETY: family tag was checked to be AF_INET.
-            let sin = unsafe { &*(storage as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
+            let sin =
+                unsafe { &*(storage as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
             let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
             let port = u16::from_be(sin.sin_port);
             Ok(SocketAddr::new(IpAddr::V4(ip), port))
         }
         libc::AF_INET6 => {
             // SAFETY: family tag was checked to be AF_INET6.
-            let sin6 = unsafe { &*(storage as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>() };
+            let sin6 = unsafe {
+                &*(storage as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>()
+            };
             let ip = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
             let port = u16::from_be(sin6.sin6_port);
             Ok(SocketAddr::new(IpAddr::V6(ip), port))

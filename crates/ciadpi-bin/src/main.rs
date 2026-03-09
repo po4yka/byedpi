@@ -33,18 +33,28 @@ fn help_text() -> String {
         text.push_str("    -F, --tfo                 Enable TCP Fast Open\n");
     }
     text.push_str("    -A, --auto <t,r,s,n,k,c>  Try desync params after this option\n");
-    text.push_str("                              Detect: torst,redirect,ssl_err,none,conn,keep,pri=<num>\n");
+    text.push_str(
+        "                              Detect: torst,redirect,ssl_err,none,conn,keep,pri=<num>\n",
+    );
     text.push_str("    -L, --auto-mode <s>       Mode: sort\n");
-    text.push_str("    -T, --timeout <s[:p:c:b]> Timeout waiting for response, after which trigger auto\n");
+    text.push_str(
+        "    -T, --timeout <s[:p:c:b]> Timeout waiting for response, after which trigger auto\n",
+    );
     text.push_str("    -y, --cache-file <path|-> Dump cache to file or stdout\n");
     text.push_str("    -u, --cache-ttl <sec>     Lifetime of cached desync params for IP\n");
     text.push_str("    -K, --proto <t,h,u,i>     Protocol whitelist: tls,http,udp,ipv4\n");
     text.push_str("    -H, --hosts <file|:str>   Hosts whitelist, filename or :string\n");
     text.push_str("    -j, --ipset <file|:str>   IP whitelist\n");
     text.push_str("    -V, --pf <port[-portr]>   Ports range whitelist\n");
-    text.push_str("    -R, --round <num[-numr]>  Number of request to which desync will be applied\n");
-    text.push_str("    -s, --split <pos_t>       Position format: offset[:repeats:skip][+flag1[flag2]]\n");
-    text.push_str("                              Flags: +s - SNI offset, +h - HTTP host offset, +n - null\n");
+    text.push_str(
+        "    -R, --round <num[-numr]>  Number of request to which desync will be applied\n",
+    );
+    text.push_str(
+        "    -s, --split <pos_t>       Position format: offset[:repeats:skip][+flag1[flag2]]\n",
+    );
+    text.push_str(
+        "                              Flags: +s - SNI offset, +h - HTTP host offset, +n - null\n",
+    );
     text.push_str("                              Additional flags: +e - end, +m - middle\n");
     text.push_str("    -d, --disorder <pos_t>    Split and send reverse order\n");
     text.push_str("    -o, --oob <pos_t>         Split and send as OOB data\n");
@@ -54,7 +64,9 @@ fn help_text() -> String {
         text.push_str("    -f, --fake <pos_t>        Split and send fake packet\n");
         #[cfg(target_os = "linux")]
         {
-            text.push_str("    -S, --md5sig              Add MD5 Signature option for fake packets\n");
+            text.push_str(
+                "    -S, --md5sig              Add MD5 Signature option for fake packets\n",
+            );
         }
         text.push_str("    -n, --fake-sni <str>      Change SNI in fake\n");
         text.push_str("                              Replaced: ? - rand let, # - rand num, * - rand let/num\n");

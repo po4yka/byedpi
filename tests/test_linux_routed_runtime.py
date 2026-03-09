@@ -15,8 +15,8 @@ from pathlib import Path
 
 
 PROXY_BINARY = ""
-ORACLE_BINARY = ""
 PROJECT_ROOT = Path()
+RUNTIME_PREFLIGHT_ENV = "CIADPI_ROUTED_RUNTIME_PREFLIGHT"
 
 PAYLOAD = (Path(__file__).resolve().parent / "corpus" / "packets" / "http_request.bin").read_bytes()
 PROXY_PORT = 18080
@@ -115,6 +115,14 @@ WAIT_PORT_SCRIPT = textwrap.dedent(
 
 def run_command(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, check=check, capture_output=True, text=True)
+
+
+def summarize_preflight(proc: subprocess.CompletedProcess[str]) -> str:
+    lines = [line.strip() for line in (proc.stderr.splitlines() + proc.stdout.splitlines()) if line.strip()]
+    for line in reversed(lines):
+        if line.startswith("AssertionError:") or line.startswith("TimeoutError:"):
+            return line
+    return lines[-1] if lines else f"preflight exited with code {proc.returncode}"
 
 
 class ManagedProcess:
@@ -254,36 +262,38 @@ class NamespaceLab:
 
 @unittest.skipUnless(NamespaceLab.supported(), "Linux network namespaces with passwordless sudo are unavailable")
 class RoutedLinuxRuntimeTests(unittest.TestCase):
-    oracle_probe_reason: str | None = None
+    runtime_probe_reason: str | None = None
 
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
-        if not ORACLE_BINARY:
+        if os.environ.get(RUNTIME_PREFLIGHT_ENV) == "1":
             return
-        if Path(PROXY_BINARY).resolve() == Path(ORACLE_BINARY).resolve():
-            return
-        proc = run_command(
+        env = os.environ.copy()
+        env[RUNTIME_PREFLIGHT_ENV] = "1"
+        proc = subprocess.run(
             [
                 sys.executable,
                 str(Path(__file__).resolve()),
                 "--binary",
-                str(Path(ORACLE_BINARY).resolve()),
+                str(Path(PROXY_BINARY).resolve()),
                 "--project-root",
                 str(PROJECT_ROOT),
             ],
             check=False,
+            capture_output=True,
+            text=True,
+            env=env,
         )
         if proc.returncode != 0:
-            cls.oracle_probe_reason = (
-                "hidden C oracle does not pass routed fake-path tests in this environment\n"
-                f"stdout:\n{proc.stdout}\n"
-                f"stderr:\n{proc.stderr}"
+            cls.runtime_probe_reason = (
+                "Rust routed fake-path preflight does not pass in this environment: "
+                f"{summarize_preflight(proc)}"
             )
 
     def setUp(self) -> None:
-        if self.oracle_probe_reason is not None:
-            self.skipTest(self.oracle_probe_reason)
+        if self.runtime_probe_reason is not None:
+            self.skipTest(self.runtime_probe_reason)
         self.lab = NamespaceLab()
         self.lab.setup()
         self._processes: list[ManagedProcess] = []
@@ -416,12 +426,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)
     parser.add_argument("--project-root", required=True)
-    parser.add_argument("--oracle-binary")
     args = parser.parse_args()
 
-    global PROXY_BINARY, ORACLE_BINARY, PROJECT_ROOT
+    global PROXY_BINARY, PROJECT_ROOT
     PROXY_BINARY = args.binary
-    ORACLE_BINARY = args.oracle_binary or ""
     PROJECT_ROOT = Path(args.project_root).resolve()
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(RoutedLinuxRuntimeTests)

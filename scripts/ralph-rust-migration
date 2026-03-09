@@ -9,10 +9,13 @@ usage() {
   cat <<'USAGE'
 Usage:
   scripts/ralph-rust-migration list
-  scripts/ralph-rust-migration dry-run all [--backend codex] [--workflow builtin:feature] [--auto-merge]
+  scripts/ralph-rust-migration doctor [--workflow builtin:feature]
+  scripts/ralph-rust-migration preflight [--workflow builtin:feature] [--strict]
+  scripts/ralph-rust-migration relaunch <run-id> [--max-iterations <n>] [--dry-run]
+  scripts/ralph-rust-migration dry-run all|full [--backend codex] [--workflow builtin:feature] [--auto-merge]
   scripts/ralph-rust-migration dry-run phase <n> [--backend codex] [--workflow builtin:feature] [--auto-merge]
   scripts/ralph-rust-migration dry-run task <id> [--backend codex] [--workflow builtin:feature] [--auto-merge]
-  scripts/ralph-rust-migration start all [--backend codex] [--workflow builtin:feature] [--auto-merge]
+  scripts/ralph-rust-migration start all|full [--backend codex] [--workflow builtin:feature] [--auto-merge]
   scripts/ralph-rust-migration start phase <n> [--backend codex] [--workflow builtin:feature] [--auto-merge]
   scripts/ralph-rust-migration start task <id> [--backend codex] [--workflow builtin:feature] [--auto-merge]
 
@@ -20,6 +23,7 @@ Defaults:
   backend      codex
   workflow     builtin:feature
   merge mode   manual (--no-auto-merge)
+  runtime cap  Ralph 2.7.0 on this machine stops after 14400s; relaunch per verified slice
 USAGE
 }
 
@@ -50,6 +54,11 @@ collect_tasks() {
     [[ -z "$phase" || "${phase#\#}" != "$phase" ]] && continue
     case "$selection_type" in
       all)
+        [[ "$phase" == "meta" ]] && continue
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$phase" "$id" "$slug" "$max_iterations" "$task_file" "$description"
+        ;;
+      full)
+        [[ "$id" == "remaining-full-migration" ]] || continue
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$phase" "$id" "$slug" "$max_iterations" "$task_file" "$description"
         ;;
       phase)
@@ -116,6 +125,21 @@ main() {
       list_tasks
       exit 0
       ;;
+    doctor)
+      shift
+      "$REPO_ROOT/scripts/ralph-loop" doctor "$@"
+      exit 0
+      ;;
+    preflight)
+      shift
+      "$REPO_ROOT/scripts/ralph-loop" preflight "$@"
+      exit 0
+      ;;
+    relaunch)
+      shift
+      "$REPO_ROOT/scripts/ralph-loop" resume-run "$@"
+      exit 0
+      ;;
     start|dry-run)
       local mode="$1"
       shift
@@ -129,7 +153,7 @@ main() {
       ;;
   esac
 
-  [[ $# -gt 0 ]] || fail "Missing selection: all | phase <n> | task <id>"
+  [[ $# -gt 0 ]] || fail "Missing selection: all | full | phase <n> | task <id>"
 
   local selection_type="$1"
   local selection_value=""
@@ -141,13 +165,16 @@ main() {
     all)
       shift
       ;;
+    full)
+      shift
+      ;;
     phase|task)
       [[ $# -ge 2 ]] || fail "$selection_type requires a value"
       selection_value="$2"
       shift 2
       ;;
     *)
-      fail "Selection must be: all | phase <n> | task <id>"
+      fail "Selection must be: all | full | phase <n> | task <id>"
       ;;
   esac
 

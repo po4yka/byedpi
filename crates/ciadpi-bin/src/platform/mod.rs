@@ -13,6 +13,8 @@ mod stub;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+pub type TcpStageWait = (bool, Duration);
+
 pub fn detect_default_ttl() -> io::Result<u8> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
     let ttl = socket.ttl()?;
@@ -118,8 +120,7 @@ pub fn send_fake_tcp(
     ttl: u8,
     md5sig: bool,
     default_ttl: u8,
-    wait_send: bool,
-    await_interval: Duration,
+    wait: TcpStageWait,
 ) -> io::Result<()> {
     linux::send_fake_tcp(
         stream,
@@ -128,8 +129,7 @@ pub fn send_fake_tcp(
         ttl,
         md5sig,
         default_ttl,
-        wait_send,
-        await_interval,
+        wait,
     )
 }
 
@@ -141,8 +141,7 @@ pub fn send_fake_tcp(
     ttl: u8,
     md5sig: bool,
     default_ttl: u8,
-    _wait_send: bool,
-    _await_interval: Duration,
+    _wait: TcpStageWait,
 ) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {

@@ -12,7 +12,7 @@ use crate::platform;
 use crate::process;
 use crate::runtime_policy::{
     extract_host, group_requires_payload, route_matches_payload, select_initial_group,
-    select_next_group, ConnectionRoute, RuntimeCache,
+    select_next_group, ConnectionRoute, RouteAdvance, RuntimeCache,
 };
 use ciadpi_config::{
     DesyncGroup, DesyncMode, RuntimeConfig, DETECT_CONNECT, DETECT_HTTP_LOCAT, DETECT_TLS_ERR,
@@ -20,11 +20,10 @@ use ciadpi_config::{
 };
 use ciadpi_desync::{build_fake_packet, plan_tcp, plan_udp, DesyncAction, DesyncPlan};
 use ciadpi_session::{
-    encode_http_connect_reply, encode_socks4_reply, encode_socks5_reply,
+    detect_response_trigger, encode_http_connect_reply, encode_socks4_reply, encode_socks5_reply,
     parse_http_connect_request, parse_socks4_request, parse_socks5_request, ClientRequest,
-    SessionConfig, SessionError, SessionState, SocketType, TriggerEvent, detect_response_trigger,
-    S_ATP_I4, S_ATP_I6, S_AUTH_BAD, S_AUTH_NONE, S_CMD_CONN, S_ER_CMD, S_ER_CONN, S_ER_GEN,
-    S_VER5,
+    SessionConfig, SessionError, SessionState, SocketType, TriggerEvent, S_ATP_I4, S_ATP_I6,
+    S_AUTH_BAD, S_AUTH_NONE, S_CMD_CONN, S_ER_CMD, S_ER_CONN, S_ER_GEN, S_VER5,
 };
 use mio::net::TcpListener as MioTcpListener;
 use mio::{Events, Interest, Poll, Token};
@@ -77,7 +76,10 @@ pub fn run_proxy(config: RuntimeConfig) -> io::Result<()> {
                         let state = state.clone();
                         let client = mio_to_std_stream(stream);
                         client.set_nonblocking(false)?;
-                        let Some(_slot) = ClientSlotGuard::acquire(state.active_clients.clone(), state.config.max_open as usize) else {
+                        let Some(_slot) = ClientSlotGuard::acquire(
+                            state.active_clients.clone(),
+                            state.config.max_open as usize,
+                        ) else {
                             drop(client);
                             continue;
                         };
@@ -207,14 +209,14 @@ fn handle_socks4(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
         resolve: state.config.resolve,
         ipv6: state.config.ipv6,
     };
-    let resolver = |host: &str, socket_type: SocketType| resolve_name(host, socket_type, &state.config);
+    let resolver =
+        |host: &str, socket_type: SocketType| resolve_name(host, socket_type, &state.config);
     let parsed = parse_socks4_request(&request, session, &resolver);
     match parsed {
         Ok(ClientRequest::Socks4Connect(target)) => {
             match maybe_delay_connect(&mut client, state, target.addr, HandshakeKind::Socks4)? {
                 DelayConnect::Immediate => {
-                    let (upstream, route) =
-                        connect_target(target.addr, state, None, false, None)?;
+                    let (upstream, route) = connect_target(target.addr, state, None, false, None)?;
                     client.write_all(encode_socks4_reply(true).as_bytes())?;
                     relay(client, upstream, state, target.addr, route, None)
                 }
@@ -245,7 +247,10 @@ fn handle_socks4(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
 
 fn handle_socks5(mut client: TcpStream, state: &RuntimeState, version: u8) -> io::Result<()> {
     if version != S_VER5 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid socks version"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid socks version",
+        ));
     }
     negotiate_socks5(&mut client)?;
     let request = read_socks5_request(&mut client)?;
@@ -253,25 +258,28 @@ fn handle_socks5(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
         resolve: state.config.resolve,
         ipv6: state.config.ipv6,
     };
-    let resolver = |host: &str, socket_type: SocketType| resolve_name(host, socket_type, &state.config);
+    let resolver =
+        |host: &str, socket_type: SocketType| resolve_name(host, socket_type, &state.config);
 
     match parse_socks5_request(&request, SocketType::Stream, session, &resolver) {
         Ok(ClientRequest::Socks5Connect(target)) => {
             match maybe_delay_connect(&mut client, state, target.addr, HandshakeKind::Socks5)? {
-                DelayConnect::Immediate => match connect_target(target.addr, state, None, false, None) {
-                    Ok((upstream, route)) => {
-                        let reply_addr = upstream
-                            .local_addr()
-                            .unwrap_or_else(|_| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
-                        client.write_all(encode_socks5_reply(0, reply_addr).as_bytes())?;
-                        relay(client, upstream, state, target.addr, route, None)
+                DelayConnect::Immediate => {
+                    match connect_target(target.addr, state, None, false, None) {
+                        Ok((upstream, route)) => {
+                            let reply_addr = upstream.local_addr().unwrap_or_else(|_| {
+                                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+                            });
+                            client.write_all(encode_socks5_reply(0, reply_addr).as_bytes())?;
+                            relay(client, upstream, state, target.addr, route, None)
+                        }
+                        Err(_) => {
+                            let fail = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+                            client.write_all(encode_socks5_reply(S_ER_CONN, fail).as_bytes())?;
+                            Ok(())
+                        }
                     }
-                    Err(_) => {
-                        let fail = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-                        client.write_all(encode_socks5_reply(S_ER_CONN, fail).as_bytes())?;
-                        Ok(())
-                    }
-                },
+                }
                 DelayConnect::Delayed { route, payload } => {
                     let host = extract_host(&payload);
                     match connect_target_with_route(
@@ -281,7 +289,9 @@ fn handle_socks5(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
                         Some(&payload),
                         host.clone(),
                     ) {
-                        Ok((upstream, route)) => relay(client, upstream, state, target.addr, route, Some(payload)),
+                        Ok((upstream, route)) => {
+                            relay(client, upstream, state, target.addr, route, Some(payload))
+                        }
                         Err(_) => Ok(()),
                     }
                 }
@@ -311,34 +321,42 @@ fn handle_socks5(mut client: TcpStream, state: &RuntimeState, version: u8) -> io
 
 fn handle_http_connect(mut client: TcpStream, state: &RuntimeState) -> io::Result<()> {
     let request = read_http_connect_request(&mut client)?;
-    let resolver = |host: &str, socket_type: SocketType| resolve_name(host, socket_type, &state.config);
+    let resolver =
+        |host: &str, socket_type: SocketType| resolve_name(host, socket_type, &state.config);
     match parse_http_connect_request(&request, &resolver) {
-        Ok(ClientRequest::HttpConnect(target)) => match maybe_delay_connect(&mut client, state, target.addr, HandshakeKind::HttpConnect)? {
-            DelayConnect::Immediate => match connect_target(target.addr, state, None, false, None) {
-                Ok((upstream, route)) => {
-                    client.write_all(encode_http_connect_reply(true).as_bytes())?;
-                    relay(client, upstream, state, target.addr, route, None)
+        Ok(ClientRequest::HttpConnect(target)) => {
+            match maybe_delay_connect(&mut client, state, target.addr, HandshakeKind::HttpConnect)?
+            {
+                DelayConnect::Immediate => {
+                    match connect_target(target.addr, state, None, false, None) {
+                        Ok((upstream, route)) => {
+                            client.write_all(encode_http_connect_reply(true).as_bytes())?;
+                            relay(client, upstream, state, target.addr, route, None)
+                        }
+                        Err(_) => {
+                            client.write_all(encode_http_connect_reply(false).as_bytes())?;
+                            Ok(())
+                        }
+                    }
                 }
-                Err(_) => {
-                    client.write_all(encode_http_connect_reply(false).as_bytes())?;
-                    Ok(())
+                DelayConnect::Delayed { route, payload } => {
+                    let host = extract_host(&payload);
+                    match connect_target_with_route(
+                        target.addr,
+                        state,
+                        route,
+                        Some(&payload),
+                        host.clone(),
+                    ) {
+                        Ok((upstream, route)) => {
+                            relay(client, upstream, state, target.addr, route, Some(payload))
+                        }
+                        Err(_) => Ok(()),
+                    }
                 }
-            },
-            DelayConnect::Delayed { route, payload } => {
-                let host = extract_host(&payload);
-                match connect_target_with_route(
-                    target.addr,
-                    state,
-                    route,
-                    Some(&payload),
-                    host.clone(),
-                ) {
-                    Ok((upstream, route)) => relay(client, upstream, state, target.addr, route, Some(payload)),
-                    Err(_) => Ok(()),
-                }
+                DelayConnect::Closed => Ok(()),
             }
-            DelayConnect::Closed => Ok(()),
-        },
+        }
         _ => {
             client.write_all(encode_http_connect_reply(false).as_bytes())?;
             Ok(())
@@ -346,7 +364,11 @@ fn handle_http_connect(mut client: TcpStream, state: &RuntimeState) -> io::Resul
     }
 }
 
-fn handle_shadowsocks(mut client: TcpStream, state: &RuntimeState, first_byte: u8) -> io::Result<()> {
+fn handle_shadowsocks(
+    mut client: TcpStream,
+    state: &RuntimeState,
+    first_byte: u8,
+) -> io::Result<()> {
     let (target, first_request) = read_shadowsocks_request(&mut client, first_byte, &state.config)?;
     let host = extract_host(&first_request);
     let payload = if first_request.is_empty() {
@@ -370,7 +392,10 @@ fn handle_shadowsocks(mut client: TcpStream, state: &RuntimeState, first_byte: u
 }
 
 fn handle_socks5_udp_associate(mut client: TcpStream, state: &RuntimeState) -> io::Result<()> {
-    let relay = build_udp_relay_socket(client.local_addr()?.ip(), state.config.protect_path.as_deref())?;
+    let relay = build_udp_relay_socket(
+        client.local_addr()?.ip(),
+        state.config.protect_path.as_deref(),
+    )?;
     let reply_addr = relay.local_addr()?;
     client.write_all(encode_socks5_reply(0, reply_addr).as_bytes())?;
 
@@ -379,7 +404,8 @@ fn handle_socks5_udp_associate(mut client: TcpStream, state: &RuntimeState) -> i
     let worker_running = running.clone();
     let config = state.config.clone();
     let group = state.config.groups[state.config.actionable_group()].clone();
-    let worker = thread::spawn(move || udp_associate_loop(worker_socket, config, group, worker_running));
+    let worker =
+        thread::spawn(move || udp_associate_loop(worker_socket, config, group, worker_running));
 
     client.set_read_timeout(Some(Duration::from_millis(250)))?;
     let mut buffer = [0u8; 64];
@@ -402,7 +428,7 @@ fn handle_socks5_udp_associate(mut client: TcpStream, state: &RuntimeState) -> i
     running.store(false, Ordering::Relaxed);
     worker
         .join()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "udp relay thread panicked"))?
+        .map_err(|_| io::Error::other("udp relay thread panicked"))?
 }
 
 fn negotiate_socks5(client: &mut TcpStream) -> io::Result<()> {
@@ -508,7 +534,11 @@ fn read_http_connect_request(client: &mut TcpStream) -> io::Result<Vec<u8>> {
     }
 }
 
-fn resolve_name(host: &str, _socket_type: SocketType, config: &RuntimeConfig) -> Option<SocketAddr> {
+fn resolve_name(
+    host: &str,
+    _socket_type: SocketType,
+    config: &RuntimeConfig,
+) -> Option<SocketAddr> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Some(SocketAddr::new(ip, 0));
     }
@@ -530,7 +560,10 @@ enum HandshakeKind {
 
 enum DelayConnect {
     Immediate,
-    Delayed { route: ConnectionRoute, payload: Vec<u8> },
+    Delayed {
+        route: ConnectionRoute,
+        payload: Vec<u8>,
+    },
     Closed,
 }
 
@@ -564,11 +597,19 @@ fn maybe_delay_connect(
         let cache = state
             .cache
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
-        select_next_group(&state.config, &cache, &route, target, Some(&payload), 0, true)
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::PermissionDenied, "no matching desync group")
-            })?
+            .map_err(|_| io::Error::other("cache mutex poisoned"))?;
+        select_next_group(
+            &state.config,
+            &cache,
+            &route,
+            target,
+            Some(&payload),
+            0,
+            true,
+        )
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::PermissionDenied, "no matching desync group")
+        })?
     };
 
     Ok(DelayConnect::Delayed { route, payload })
@@ -675,7 +716,7 @@ fn select_route(
     let mut cache = state
         .cache
         .lock()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+        .map_err(|_| io::Error::other("cache mutex poisoned"))?;
     select_initial_group(
         &state.config,
         &mut cache,
@@ -712,15 +753,17 @@ fn connect_target_with_route(
                     let mut cache = state
                         .cache
                         .lock()
-                        .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+                        .map_err(|_| io::Error::other("cache mutex poisoned"))?;
                     cache.advance_route(
                         &state.config,
                         &route,
-                        target,
-                        payload,
-                        DETECT_CONNECT,
-                        true,
-                        host.clone(),
+                        RouteAdvance {
+                            dest: target,
+                            payload,
+                            trigger: DETECT_CONNECT,
+                            can_reconnect: true,
+                            host: host.clone(),
+                        },
                     )?
                 };
                 let Some(next) = next else {
@@ -835,7 +878,12 @@ fn read_upstream_socks_reply(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
             stream.read_exact(&mut tail)?;
             out.extend_from_slice(&tail);
         }
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid upstream socks reply")),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid upstream socks reply",
+            ))
+        }
     }
     Ok(out)
 }
@@ -873,8 +921,7 @@ fn udp_associate_loop(
                 let known_client = udp_client_addr;
                 if known_client.is_none() || known_client == Some(sender) {
                     udp_client_addr = Some(sender);
-                    let Some((target, payload)) =
-                        parse_socks5_udp_packet(&buffer[..n], &config)
+                    let Some((target, payload)) = parse_socks5_udp_packet(&buffer[..n], &config)
                     else {
                         continue;
                     };
@@ -921,7 +968,10 @@ fn parse_socks5_udp_packet<'a>(
             let mut raw = [0u8; 16];
             raw.copy_from_slice(&packet[4..20]);
             let port = u16::from_be_bytes([packet[20], packet[21]]);
-            Some((SocketAddr::new(IpAddr::V6(Ipv6Addr::from(raw)), port), &packet[22..]))
+            Some((
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::from(raw)), port),
+                &packet[22..],
+            ))
         }
         0x03 => {
             let len = *packet.get(4)? as usize;
@@ -1070,15 +1120,17 @@ fn relay(
                         let mut cache = state
                             .cache
                             .lock()
-                            .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+                            .map_err(|_| io::Error::other("cache mutex poisoned"))?;
                         cache.advance_route(
                             &state.config,
                             &route,
-                            target,
-                            Some(&original_request),
-                            DETECT_TORST,
-                            true,
-                            host.clone(),
+                            RouteAdvance {
+                                dest: target,
+                                payload: Some(&original_request),
+                                trigger: DETECT_TORST,
+                                can_reconnect: true,
+                                host: host.clone(),
+                            },
                         )?
                     };
                     let Some(next) = next else {
@@ -1113,15 +1165,17 @@ fn relay(
                             let mut cache = state
                                 .cache
                                 .lock()
-                                .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+                                .map_err(|_| io::Error::other("cache mutex poisoned"))?;
                             cache.advance_route(
                                 &state.config,
                                 &route,
-                                target,
-                                Some(&original_request),
-                                trigger_flag(trigger),
-                                true,
-                                host.clone(),
+                                RouteAdvance {
+                                    dest: target,
+                                    payload: Some(&original_request),
+                                    trigger: trigger_flag(trigger),
+                                    can_reconnect: true,
+                                    host: host.clone(),
+                                },
                             )?
                         };
                         let Some(next) = next else {
@@ -1176,7 +1230,8 @@ fn relay_streams(
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing desync group"))?;
     let drop_sack = group.drop_sack;
 
-    let down = thread::spawn(move || copy_inbound_half(upstream_reader, client_writer, inbound_session));
+    let down =
+        thread::spawn(move || copy_inbound_half(upstream_reader, client_writer, inbound_session));
     let up = thread::spawn(move || {
         copy_outbound_half(
             client_reader,
@@ -1189,10 +1244,10 @@ fn relay_streams(
 
     let up_result = up
         .join()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "upstream thread panicked"))?;
+        .map_err(|_| io::Error::other("upstream thread panicked"))?;
     let down_result = down
         .join()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "downstream thread panicked"))?;
+        .map_err(|_| io::Error::other("downstream thread panicked"))?;
 
     if drop_sack {
         let _ = platform::detach_drop_sack(&upstream);
@@ -1225,7 +1280,10 @@ fn read_optional_first_request(
             if matches!(
                 err.kind(),
                 io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) => Ok(None),
+            ) =>
+        {
+            Ok(None)
+        }
         Err(err) => Err(err),
     };
     client.set_read_timeout(fallback_timeout)?;
@@ -1312,7 +1370,10 @@ fn read_first_response(
     }
 }
 
-fn first_response_timeout(config: &RuntimeConfig, tls_partial: &TlsRecordTracker) -> Option<Duration> {
+fn first_response_timeout(
+    config: &RuntimeConfig,
+    tls_partial: &TlsRecordTracker,
+) -> Option<Duration> {
     if tls_partial.active() {
         Some(Duration::from_millis(config.partial_timeout_ms as u64))
     } else if config.timeout_ms != 0 {
@@ -1339,10 +1400,7 @@ fn response_trigger_supported(config: &RuntimeConfig, trigger: TriggerEvent) -> 
         TriggerEvent::Connect => DETECT_CONNECT,
         TriggerEvent::Torst => DETECT_TORST,
     };
-    config
-        .groups
-        .iter()
-        .any(|group| group.detect & flag != 0)
+    config.groups.iter().any(|group| group.detect & flag != 0)
 }
 
 #[derive(Default)]
@@ -1439,15 +1497,17 @@ fn reconnect_target(
                     let mut cache = state
                         .cache
                         .lock()
-                        .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+                        .map_err(|_| io::Error::other("cache mutex poisoned"))?;
                     cache.advance_route(
                         &state.config,
                         &route,
-                        target,
-                        payload,
-                        DETECT_CONNECT,
-                        true,
-                        host.clone(),
+                        RouteAdvance {
+                            dest: target,
+                            payload,
+                            trigger: DETECT_CONNECT,
+                            can_reconnect: true,
+                            host: host.clone(),
+                        },
                     )?
                 };
                 let Some(next) = next else {
@@ -1463,7 +1523,7 @@ fn runtime_supports_trigger(state: &RuntimeState, trigger: u32) -> io::Result<bo
     let cache = state
         .cache
         .lock()
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "cache mutex poisoned"))?;
+        .map_err(|_| io::Error::other("cache mutex poisoned"))?;
     Ok(cache.supports_trigger(trigger))
 }
 
@@ -1520,7 +1580,7 @@ fn copy_outbound_half(
         let round = {
             let mut state = session
                 .lock()
-                .map_err(|_| io::Error::new(io::ErrorKind::Other, "session mutex poisoned"))?;
+                .map_err(|_| io::Error::other("session mutex poisoned"))?;
             state.observe_outbound(payload);
             state.round_count as i32
         };
@@ -1564,7 +1624,10 @@ fn should_desync_tcp(group: &DesyncGroup, round: i32) -> bool {
 }
 
 fn has_tcp_actions(group: &DesyncGroup) -> bool {
-    !group.parts.is_empty() || group.mod_http != 0 || !group.tls_records.is_empty() || group.tlsminor.is_some()
+    !group.parts.is_empty()
+        || group.mod_http != 0
+        || !group.tls_records.is_empty()
+        || group.tlsminor.is_some()
 }
 
 fn check_round(rounds: [i32; 2], round: i32) -> bool {
@@ -1581,9 +1644,10 @@ fn execute_tcp_actions(
     for action in actions {
         match action {
             DesyncAction::Write(bytes) => writer.write_all(bytes)?,
-            DesyncAction::WriteUrgent { prefix, urgent_byte } => {
-                send_out_of_band(writer, prefix, *urgent_byte)?
-            }
+            DesyncAction::WriteUrgent {
+                prefix,
+                urgent_byte,
+            } => send_out_of_band(writer, prefix, *urgent_byte)?,
             DesyncAction::SetTtl(ttl) => set_stream_ttl(writer, *ttl)?,
             DesyncAction::RestoreDefaultTtl => {
                 if default_ttl != 0 {
@@ -1687,8 +1751,10 @@ fn execute_tcp_plan(
                     group.ttl.unwrap_or(8),
                     group.md5sig,
                     config.default_ttl,
-                    config.wait_send,
-                    Duration::from_millis(config.await_interval.max(1) as u64),
+                    (
+                        config.wait_send,
+                        Duration::from_millis(config.await_interval.max(1) as u64),
+                    ),
                 )?;
             }
         }

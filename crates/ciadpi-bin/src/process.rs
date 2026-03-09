@@ -29,7 +29,9 @@ impl ProcessGuard {
                 Some(path) => Some(PidFileGuard::create(Path::new(path))?),
                 None => None,
             };
-            return Ok(Self { _pid_file: pid_file });
+            Ok(Self {
+                _pid_file: pid_file,
+            })
         }
 
         #[cfg(not(unix))]
@@ -51,6 +53,11 @@ pub fn shutdown_requested() -> bool {
 
 pub fn request_shutdown() {
     SHUTDOWN.store(true, Ordering::Relaxed);
+}
+
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) fn reset_shutdown_for_test() {
+    SHUTDOWN.store(false, Ordering::Relaxed);
 }
 
 #[cfg(unix)]
@@ -93,6 +100,7 @@ impl PidFileGuard {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
 
         let mut lock = libc::flock {
