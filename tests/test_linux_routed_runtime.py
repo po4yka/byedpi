@@ -17,7 +17,7 @@ from pathlib import Path
 PROXY_BINARY = ""
 PROJECT_ROOT = Path()
 RUNTIME_PREFLIGHT_ENV = "CIADPI_ROUTED_RUNTIME_PREFLIGHT"
-MD5SIG_UNSUPPORTED = "Protocol not available (os error 92)"
+MD5SIG_UNSUPPORTED_ERRNOS = {92, 95}
 
 PAYLOAD = (Path(__file__).resolve().parent / "corpus" / "packets" / "http_request.bin").read_bytes()
 PROXY_PORT = 18080
@@ -110,6 +110,93 @@ WAIT_PORT_SCRIPT = textwrap.dedent(
         except OSError:
             time.sleep(0.05)
     raise SystemExit(1)
+    """
+)
+
+MD5SIG_PROBE_SERVER_SCRIPT = textwrap.dedent(
+    """
+    import pathlib
+    import socket
+    import sys
+    import time
+
+    host = sys.argv[1]
+    port = int(sys.argv[2])
+    ready = pathlib.Path(sys.argv[3])
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.listen(1)
+    ready.write_text("ready")
+    conn, _ = sock.accept()
+    time.sleep(1.0)
+    conn.close()
+    sock.close()
+    """
+)
+
+MD5SIG_PROBE_CLIENT_SCRIPT = textwrap.dedent(
+    """
+    import ctypes
+    import os
+    import socket
+    import sys
+
+    TCP_MD5SIG = 14
+
+    host = sys.argv[1]
+    port = int(sys.argv[2])
+    sock = socket.create_connection((host, port), timeout=5)
+
+    class SockAddrStorage(ctypes.Structure):
+        _fields_ = [("data", ctypes.c_ubyte * 128)]
+
+    class InAddr(ctypes.Structure):
+        _fields_ = [("s_addr", ctypes.c_ubyte * 4)]
+
+    class SockAddrIn(ctypes.Structure):
+        _fields_ = [
+            ("sin_family", ctypes.c_ushort),
+            ("sin_port", ctypes.c_ushort),
+            ("sin_addr", InAddr),
+            ("sin_zero", ctypes.c_ubyte * 8),
+        ]
+
+    class TcpMd5Sig(ctypes.Structure):
+        _fields_ = [
+            ("addr", SockAddrStorage),
+            ("pad1", ctypes.c_ushort),
+            ("key_len", ctypes.c_ushort),
+            ("pad2", ctypes.c_uint32),
+            ("key", ctypes.c_ubyte * 80),
+        ]
+
+    addr = SockAddrIn()
+    addr.sin_family = socket.AF_INET
+    addr.sin_port = socket.htons(port)
+    ctypes.memmove(addr.sin_addr.s_addr, socket.inet_aton(host), 4)
+
+    md5 = TcpMd5Sig()
+    ctypes.memmove(ctypes.byref(md5.addr), ctypes.byref(addr), ctypes.sizeof(addr))
+    md5.key_len = 5
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    rc = libc.setsockopt(
+        sock.fileno(),
+        socket.IPPROTO_TCP,
+        TCP_MD5SIG,
+        ctypes.byref(md5),
+        ctypes.sizeof(md5),
+    )
+    if rc == 0:
+        sock.close()
+        raise SystemExit(0)
+
+    err = ctypes.get_errno()
+    print(f"{err}:{os.strerror(err)}", file=sys.stderr)
+    sock.close()
+    raise SystemExit(err or 1)
     """
 )
 
@@ -264,6 +351,7 @@ class NamespaceLab:
 @unittest.skipUnless(NamespaceLab.supported(), "Linux network namespaces with passwordless sudo are unavailable")
 class RoutedLinuxRuntimeTests(unittest.TestCase):
     runtime_probe_reason: str | None = None
+    md5sig_probe_reason: str | None = None
     PREFLIGHT_TEST = "test_fake_ttl_retransmits_original_payload_across_routed_path"
 
     @classmethod
@@ -293,6 +381,58 @@ class RoutedLinuxRuntimeTests(unittest.TestCase):
                 "Rust routed fake-path preflight does not pass in this environment: "
                 f"{summarize_preflight(proc)}"
             )
+            return
+
+        cls.md5sig_probe_reason = cls._probe_md5sig_support()
+
+    @classmethod
+    def _probe_md5sig_support(cls) -> str | None:
+        lab = NamespaceLab()
+        processes: list[ManagedProcess] = []
+        try:
+            lab.setup()
+            ready = lab.tmpdir / "md5sig.ready"
+            server = lab.exec_popen(
+                lab.server_ns,
+                "python3",
+                "-c",
+                MD5SIG_PROBE_SERVER_SCRIPT,
+                "10.200.3.2",
+                str(SERVER_PORT),
+                str(ready),
+            )
+            processes.append(server)
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if ready.exists():
+                    break
+                if server._proc and server._proc.poll() is not None:
+                    raise AssertionError(f"md5sig probe server exited early:\n{server.read_log()}")
+                time.sleep(0.05)
+            else:
+                raise AssertionError(f"md5sig probe server did not become ready:\n{server.read_log()}")
+
+            proc = lab.exec_run(
+                lab.proxy_ns,
+                "python3",
+                "-c",
+                MD5SIG_PROBE_CLIENT_SCRIPT,
+                "10.200.3.2",
+                str(SERVER_PORT),
+                check=False,
+            )
+            if proc.returncode == 0:
+                return None
+            if proc.returncode in MD5SIG_UNSUPPORTED_ERRNOS:
+                return "TCP_MD5SIG is unavailable in this kernel/runtime environment"
+            raise AssertionError(
+                f"md5sig capability probe failed ({proc.returncode})\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+            )
+        finally:
+            for process in reversed(processes):
+                process.stop()
+                process.cleanup()
+            lab.cleanup()
 
     def setUp(self) -> None:
         if self.runtime_probe_reason is not None:
@@ -406,9 +546,6 @@ class RoutedLinuxRuntimeTests(unittest.TestCase):
                 server.stop()
 
         proxy_log = proxy.read_log() if proxy else ""
-        if "--md5sig" in extra_args and MD5SIG_UNSUPPORTED in proxy_log:
-            self.skipTest("TCP_MD5SIG is unavailable in this kernel/runtime environment")
-
         if not received_path.exists():
             raise AssertionError(f"server did not record payload:\n{server.read_log() if server else ''}")
 
@@ -421,12 +558,25 @@ class RoutedLinuxRuntimeTests(unittest.TestCase):
         self._assert_routed_case(["--fake", "8", "--ttl", "1", "--wait-send", "--await-int", "5"])
 
     def test_md5sig_fake_retransmits_original_payload_across_routed_path(self) -> None:
+        if self.md5sig_probe_reason is not None:
+            self.skipTest(self.md5sig_probe_reason)
         self._assert_routed_case(["--fake", "8", "--md5sig", "--wait-send", "--await-int", "5"])
 
     def test_drop_sack_fake_survives_routed_sack_path(self) -> None:
         self._assert_routed_case(
             ["--fake", "8", "--ttl", "1", "--drop-sack", "--wait-send", "--await-int", "5"]
         )
+
+
+def emit_md5sig_operator_note() -> None:
+    reason = RoutedLinuxRuntimeTests.md5sig_probe_reason
+    if reason is None:
+        return
+    note = f"md5sig routed runtime case skipped: {reason}"
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title=Routed md5sig skipped::{note}", file=sys.stderr)
+    else:
+        print(f"NOTE: {note}", file=sys.stderr)
 
 
 def main() -> int:
@@ -448,6 +598,7 @@ def main() -> int:
     else:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(RoutedLinuxRuntimeTests)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
+    emit_md5sig_operator_note()
     return 0 if result.wasSuccessful() else 1
 
 
