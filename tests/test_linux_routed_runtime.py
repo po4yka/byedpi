@@ -17,6 +17,7 @@ from pathlib import Path
 PROXY_BINARY = ""
 PROJECT_ROOT = Path()
 RUNTIME_PREFLIGHT_ENV = "CIADPI_ROUTED_RUNTIME_PREFLIGHT"
+MD5SIG_UNSUPPORTED = "Protocol not available (os error 92)"
 
 PAYLOAD = (Path(__file__).resolve().parent / "corpus" / "packets" / "http_request.bin").read_bytes()
 PROXY_PORT = 18080
@@ -263,6 +264,7 @@ class NamespaceLab:
 @unittest.skipUnless(NamespaceLab.supported(), "Linux network namespaces with passwordless sudo are unavailable")
 class RoutedLinuxRuntimeTests(unittest.TestCase):
     runtime_probe_reason: str | None = None
+    PREFLIGHT_TEST = "test_fake_ttl_retransmits_original_payload_across_routed_path"
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -279,6 +281,7 @@ class RoutedLinuxRuntimeTests(unittest.TestCase):
                 str(Path(PROXY_BINARY).resolve()),
                 "--project-root",
                 str(PROJECT_ROOT),
+                "--preflight-check",
             ],
             check=False,
             capture_output=True,
@@ -402,13 +405,17 @@ class RoutedLinuxRuntimeTests(unittest.TestCase):
             if server:
                 server.stop()
 
+        proxy_log = proxy.read_log() if proxy else ""
+        if "--md5sig" in extra_args and MD5SIG_UNSUPPORTED in proxy_log:
+            self.skipTest("TCP_MD5SIG is unavailable in this kernel/runtime environment")
+
         if not received_path.exists():
             raise AssertionError(f"server did not record payload:\n{server.read_log() if server else ''}")
 
         received = received_path.read_bytes()
         echoed = echoed_path.read_bytes()
         self.assertEqual(received, PAYLOAD, server.read_log() if server else "")
-        self.assertEqual(echoed, PAYLOAD, proxy.read_log() if proxy else "")
+        self.assertEqual(echoed, PAYLOAD, proxy_log)
 
     def test_fake_ttl_retransmits_original_payload_across_routed_path(self) -> None:
         self._assert_routed_case(["--fake", "8", "--ttl", "1", "--wait-send", "--await-int", "5"])
@@ -426,13 +433,20 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)
     parser.add_argument("--project-root", required=True)
+    parser.add_argument("--preflight-check", action="store_true")
     args = parser.parse_args()
 
     global PROXY_BINARY, PROJECT_ROOT
     PROXY_BINARY = args.binary
     PROJECT_ROOT = Path(args.project_root).resolve()
 
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(RoutedLinuxRuntimeTests)
+    if args.preflight_check:
+        suite = unittest.defaultTestLoader.loadTestsFromName(
+            f"{RoutedLinuxRuntimeTests.__name__}.{RoutedLinuxRuntimeTests.PREFLIGHT_TEST}",
+            module=sys.modules[__name__],
+        )
+    else:
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(RoutedLinuxRuntimeTests)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() else 1
 

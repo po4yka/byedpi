@@ -22,6 +22,50 @@ struct TcpMd5Sig {
 
 const SO_ORIGINAL_DST: libc::c_int = 80;
 const IP6T_SO_ORIGINAL_DST: libc::c_int = 80;
+const TCP_ESTABLISHED: u8 = 1;
+
+#[repr(C)]
+struct LinuxTcpInfo {
+    tcpi_state: u8,
+    tcpi_ca_state: u8,
+    tcpi_retransmits: u8,
+    tcpi_probes: u8,
+    tcpi_backoff: u8,
+    tcpi_options: u8,
+    tcpi_snd_wscale_rcv_wscale: u8,
+    tcpi_delivery_rate_app_limited_fastopen_client_fail: u8,
+    tcpi_rto: u32,
+    tcpi_ato: u32,
+    tcpi_snd_mss: u32,
+    tcpi_rcv_mss: u32,
+    tcpi_unacked: u32,
+    tcpi_sacked: u32,
+    tcpi_lost: u32,
+    tcpi_retrans: u32,
+    tcpi_fackets: u32,
+    tcpi_last_data_sent: u32,
+    tcpi_last_ack_sent: u32,
+    tcpi_last_data_recv: u32,
+    tcpi_last_ack_recv: u32,
+    tcpi_pmtu: u32,
+    tcpi_rcv_ssthresh: u32,
+    tcpi_rtt: u32,
+    tcpi_rttvar: u32,
+    tcpi_snd_ssthresh: u32,
+    tcpi_snd_cwnd: u32,
+    tcpi_advmss: u32,
+    tcpi_reordering: u32,
+    tcpi_rcv_rtt: u32,
+    tcpi_rcv_space: u32,
+    tcpi_total_retrans: u32,
+    tcpi_pacing_rate: u64,
+    tcpi_max_pacing_rate: u64,
+    tcpi_bytes_acked: u64,
+    tcpi_bytes_received: u64,
+    tcpi_segs_out: u32,
+    tcpi_segs_in: u32,
+    tcpi_notsent_bytes: u32,
+}
 
 pub fn enable_tcp_fastopen_connect<T: AsRawFd>(socket: &T) -> io::Result<()> {
     let yes = 1i32;
@@ -421,14 +465,31 @@ fn set_stream_ttl(stream: &TcpStream, ttl: u8) -> io::Result<()> {
 }
 
 fn tcp_has_notsent(fd: libc::c_int) -> io::Result<bool> {
-    let mut outq = 0i32;
-    // SAFETY: `outq` is a valid writable integer and `fd` is a live socket.
-    let rc = unsafe { libc::ioctl(fd, libc::TIOCOUTQ, &mut outq) };
+    let mut info = unsafe { zeroed::<LinuxTcpInfo>() };
+    let mut info_len = size_of::<LinuxTcpInfo>() as libc::socklen_t;
+    // SAFETY: `info` is writable storage for the Linux `tcp_info` prefix that
+    // includes `tcpi_notsent_bytes`, and `fd` is a live TCP socket descriptor.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_INFO,
+            (&mut info as *mut LinuxTcpInfo).cast(),
+            &mut info_len,
+        )
+    };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(outq != 0)
+    if (info_len as usize) < size_of::<LinuxTcpInfo>() {
+        return Ok(false);
+    }
+    if info.tcpi_state != TCP_ESTABLISHED {
+        return Ok(false);
+    }
+    Ok(info.tcpi_notsent_bytes != 0)
 }
+
 
 fn wait_tcp_stage_fd(fd: libc::c_int, wait_send: bool, await_interval: Duration) -> io::Result<()> {
     let sleep_for = if await_interval.is_zero() {
@@ -448,6 +509,9 @@ fn wait_tcp_stage_fd(fd: libc::c_int, wait_send: bool, await_interval: Duration)
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if Instant::now() >= deadline {
+            if wait_send {
+                return Ok(());
+            }
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "timed out waiting for tcp send queue to drain",
