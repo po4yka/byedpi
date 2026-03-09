@@ -210,6 +210,16 @@ class ManagedProcess:
         Path(self._log.name).unlink(missing_ok=True)
 
 
+def find_system_tool(name: str) -> str | None:
+    path = shutil.which(name)
+    if path is not None:
+        return path
+    for candidate in (Path("/usr/sbin") / name, Path("/sbin") / name):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 class TransparentLab:
     counter = 0
 
@@ -217,9 +227,9 @@ class TransparentLab:
     def supported() -> bool:
         if sys.platform != "linux":
             return False
-        if not shutil.which("ip"):
+        if find_system_tool("ip") is None:
             return False
-        if not (shutil.which("iptables") or shutil.which("nft")):
+        if not (find_system_tool("iptables") or find_system_tool("nft")):
             return False
         if os.geteuid() == 0:
             return True
@@ -260,36 +270,40 @@ class TransparentLab:
         return proc
 
     def setup(self) -> None:
+        ip = find_system_tool("ip")
+        assert ip is not None
+        iptables = find_system_tool("iptables")
+        nft = find_system_tool("nft")
         self.delete_namespaces()
         for namespace in self.namespaces:
-            self.sudo("ip", "netns", "add", namespace)
-            self.sudo("ip", "-n", namespace, "link", "set", "lo", "up")
+            self.sudo(ip, "netns", "add", namespace)
+            self.sudo(ip, "-n", namespace, "link", "set", "lo", "up")
 
-        self.sudo("ip", "link", "add", self.links["client"], "type", "veth", "peer", "name", self.links["proxy_left"])
-        self.sudo("ip", "link", "set", self.links["client"], "netns", self.client_ns)
-        self.sudo("ip", "link", "set", self.links["proxy_left"], "netns", self.proxy_ns)
+        self.sudo(ip, "link", "add", self.links["client"], "type", "veth", "peer", "name", self.links["proxy_left"])
+        self.sudo(ip, "link", "set", self.links["client"], "netns", self.client_ns)
+        self.sudo(ip, "link", "set", self.links["proxy_left"], "netns", self.proxy_ns)
 
-        self.sudo("ip", "link", "add", self.links["proxy_right"], "type", "veth", "peer", "name", self.links["server"])
-        self.sudo("ip", "link", "set", self.links["proxy_right"], "netns", self.proxy_ns)
-        self.sudo("ip", "link", "set", self.links["server"], "netns", self.server_ns)
+        self.sudo(ip, "link", "add", self.links["proxy_right"], "type", "veth", "peer", "name", self.links["server"])
+        self.sudo(ip, "link", "set", self.links["proxy_right"], "netns", self.proxy_ns)
+        self.sudo(ip, "link", "set", self.links["server"], "netns", self.server_ns)
 
-        self.sudo("ip", "-n", self.client_ns, "addr", "add", "10.220.1.2/24", "dev", self.links["client"])
-        self.sudo("ip", "-n", self.client_ns, "link", "set", self.links["client"], "up")
-        self.sudo("ip", "-n", self.client_ns, "route", "add", "default", "via", "10.220.1.1")
+        self.sudo(ip, "-n", self.client_ns, "addr", "add", "10.220.1.2/24", "dev", self.links["client"])
+        self.sudo(ip, "-n", self.client_ns, "link", "set", self.links["client"], "up")
+        self.sudo(ip, "-n", self.client_ns, "route", "add", "default", "via", "10.220.1.1")
 
-        self.sudo("ip", "-n", self.proxy_ns, "addr", "add", "10.220.1.1/24", "dev", self.links["proxy_left"])
-        self.sudo("ip", "-n", self.proxy_ns, "addr", "add", "10.220.2.1/24", "dev", self.links["proxy_right"])
-        self.sudo("ip", "-n", self.proxy_ns, "link", "set", self.links["proxy_left"], "up")
-        self.sudo("ip", "-n", self.proxy_ns, "link", "set", self.links["proxy_right"], "up")
+        self.sudo(ip, "-n", self.proxy_ns, "addr", "add", "10.220.1.1/24", "dev", self.links["proxy_left"])
+        self.sudo(ip, "-n", self.proxy_ns, "addr", "add", "10.220.2.1/24", "dev", self.links["proxy_right"])
+        self.sudo(ip, "-n", self.proxy_ns, "link", "set", self.links["proxy_left"], "up")
+        self.sudo(ip, "-n", self.proxy_ns, "link", "set", self.links["proxy_right"], "up")
 
-        self.sudo("ip", "-n", self.server_ns, "addr", "add", "10.220.2.2/24", "dev", self.links["server"])
-        self.sudo("ip", "-n", self.server_ns, "link", "set", self.links["server"], "up")
-        self.sudo("ip", "-n", self.server_ns, "route", "add", "default", "via", "10.220.2.1")
+        self.sudo(ip, "-n", self.server_ns, "addr", "add", "10.220.2.2/24", "dev", self.links["server"])
+        self.sudo(ip, "-n", self.server_ns, "link", "set", self.links["server"], "up")
+        self.sudo(ip, "-n", self.server_ns, "route", "add", "default", "via", "10.220.2.1")
 
-        if shutil.which("iptables"):
+        if iptables is not None:
             self.exec_run(
                 self.proxy_ns,
-                "iptables",
+                iptables,
                 "-t",
                 "nat",
                 "-A",
@@ -309,10 +323,11 @@ class TransparentLab:
             )
             return
 
-        self.exec_run(self.proxy_ns, "nft", "add", "table", "ip", "nat")
+        assert nft is not None
+        self.exec_run(self.proxy_ns, nft, "add", "table", "ip", "nat")
         self.exec_run(
             self.proxy_ns,
-            "nft",
+            nft,
             "add",
             "chain",
             "ip",
@@ -329,7 +344,7 @@ class TransparentLab:
         )
         self.exec_run(
             self.proxy_ns,
-            "nft",
+            nft,
             "add",
             "rule",
             "ip",
@@ -350,8 +365,11 @@ class TransparentLab:
         )
 
     def delete_namespaces(self) -> None:
+        ip = find_system_tool("ip")
+        if ip is None:
+            return
         for namespace in reversed(self.namespaces):
-            self.sudo("ip", "netns", "del", namespace, check=False)
+            self.sudo(ip, "netns", "del", namespace, check=False)
 
     def cleanup(self) -> None:
         self.delete_namespaces()

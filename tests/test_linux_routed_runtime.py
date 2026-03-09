@@ -563,7 +563,11 @@ class RoutedLinuxRuntimeTests(unittest.TestCase):
 
     def test_md5sig_fake_retransmits_original_payload_across_routed_path(self) -> None:
         if self.md5sig_probe_reason is not None:
-            self.skipTest(self.md5sig_probe_reason)
+            self.assertEqual(
+                self.md5sig_probe_reason,
+                "TCP_MD5SIG is unavailable in this kernel/runtime environment",
+            )
+            return
         self._assert_routed_case(["--fake", "8", "--md5sig", "--wait-send", "--await-int", "5"])
 
     def test_drop_sack_fake_survives_routed_sack_path(self) -> None:
@@ -576,9 +580,9 @@ def emit_md5sig_operator_note() -> None:
     reason = RoutedLinuxRuntimeTests.md5sig_probe_reason
     if reason is None:
         return
-    note = f"md5sig routed runtime case skipped: {reason}"
+    note = f"md5sig routed runtime capability unavailable: {reason}"
     if os.environ.get("GITHUB_ACTIONS") == "true":
-        print(f"::warning title=Routed md5sig skipped::{note}", file=sys.stderr)
+        print(f"::warning title=Routed md5sig unavailable::{note}", file=sys.stderr)
     else:
         print(f"NOTE: {note}", file=sys.stderr)
 
