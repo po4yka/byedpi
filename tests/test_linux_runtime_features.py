@@ -217,7 +217,13 @@ class TransparentLab:
     def supported() -> bool:
         if sys.platform != "linux":
             return False
-        if not shutil.which("ip") or not shutil.which("sudo") or not shutil.which("iptables"):
+        if not shutil.which("ip"):
+            return False
+        if not (shutil.which("iptables") or shutil.which("nft")):
+            return False
+        if os.geteuid() == 0:
+            return True
+        if not shutil.which("sudo"):
             return False
         return subprocess.run(["sudo", "-n", "true"], capture_output=True, check=False).returncode == 0
 
@@ -280,25 +286,67 @@ class TransparentLab:
         self.sudo("ip", "-n", self.server_ns, "link", "set", self.links["server"], "up")
         self.sudo("ip", "-n", self.server_ns, "route", "add", "default", "via", "10.220.2.1")
 
+        if shutil.which("iptables"):
+            self.exec_run(
+                self.proxy_ns,
+                "iptables",
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                "-p",
+                "tcp",
+                "-s",
+                "10.220.1.2",
+                "-d",
+                "10.220.2.2",
+                "--dport",
+                str(TARGET_PORT),
+                "-j",
+                "REDIRECT",
+                "--to-ports",
+                str(PROXY_PORT),
+            )
+            return
+
+        self.exec_run(self.proxy_ns, "nft", "add", "table", "ip", "nat")
         self.exec_run(
             self.proxy_ns,
-            "iptables",
-            "-t",
+            "nft",
+            "add",
+            "chain",
+            "ip",
             "nat",
-            "-A",
-            "PREROUTING",
-            "-p",
-            "tcp",
-            "-s",
+            "prerouting",
+            "{",
+            "type",
+            "nat",
+            "hook",
+            "prerouting",
+            "priority",
+            "dstnat;",
+            "}",
+        )
+        self.exec_run(
+            self.proxy_ns,
+            "nft",
+            "add",
+            "rule",
+            "ip",
+            "nat",
+            "prerouting",
+            "ip",
+            "saddr",
             "10.220.1.2",
-            "-d",
+            "ip",
+            "daddr",
             "10.220.2.2",
-            "--dport",
+            "tcp",
+            "dport",
             str(TARGET_PORT),
-            "-j",
-            "REDIRECT",
-            "--to-ports",
-            str(PROXY_PORT),
+            "redirect",
+            "to",
+            f":{PROXY_PORT}",
         )
 
     def delete_namespaces(self) -> None:
@@ -359,7 +407,10 @@ class LinuxProtectPathTests(unittest.TestCase):
             self.assertEqual(protect.received_peer[1], echo_server.server_address[1])
 
 
-@unittest.skipUnless(TransparentLab.supported(), "transparent proxy test requires Linux netns, iptables, and passwordless sudo")
+@unittest.skipUnless(
+    TransparentLab.supported(),
+    "transparent proxy test requires Linux netns plus an available NAT redirect backend",
+)
 class LinuxTransparentProxyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.lab = TransparentLab()

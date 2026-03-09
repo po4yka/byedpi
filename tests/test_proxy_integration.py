@@ -514,8 +514,6 @@ class ProxyIntegrationTests(unittest.TestCase):
                     self.assertEqual(recv_exact(sock, len(payload)), payload)
 
     def test_socks5_ipv6_echo(self) -> None:
-        if not sys.platform.startswith("linux"):
-            self.skipTest("IPv6 parity is gated on Linux")
         server = self._maybe_ipv6_server()
         if server is None:
             self.skipTest("IPv6 loopback is unavailable")

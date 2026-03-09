@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import select
 import shutil
 import signal
@@ -105,7 +106,11 @@ class TcpdumpCapture:
     def supported() -> bool:
         if not sys.platform.startswith("linux"):
             return False
-        if not shutil.which("tcpdump") or not shutil.which("sudo"):
+        if not shutil.which("tcpdump"):
+            return False
+        if os.geteuid() == 0:
+            return True
+        if not shutil.which("sudo"):
             return False
         return subprocess.run(
             ["sudo", "-n", "true"], capture_output=True, check=False

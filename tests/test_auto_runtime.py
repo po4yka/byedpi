@@ -183,8 +183,7 @@ class AutoRuntimeTests(unittest.TestCase):
             text=True,
             check=False,
         ).stdout
-        if "-T, --timeout" not in help_text:
-            self.skipTest("binary does not expose timeout runtime support on this platform")
+        self.assertIn("-T, --timeout", help_text)
 
     def test_connect_trigger_reuses_cached_fallback_route_within_process(self) -> None:
         echo = self._start_server(ThreadingTCPServer(("127.0.0.1", 0), EchoHandler))

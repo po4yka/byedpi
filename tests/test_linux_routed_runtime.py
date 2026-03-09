@@ -258,7 +258,11 @@ class NamespaceLab:
     def supported() -> bool:
         if not sys.platform.startswith("linux"):
             return False
-        if not shutil.which("ip") or not shutil.which("sudo"):
+        if not shutil.which("ip"):
+            return False
+        if os.geteuid() == 0:
+            return True
+        if not shutil.which("sudo"):
             return False
         return subprocess.run(
             ["sudo", "-n", "true"], capture_output=True, check=False
@@ -348,7 +352,7 @@ class NamespaceLab:
         self._tmpdir.cleanup()
 
 
-@unittest.skipUnless(NamespaceLab.supported(), "Linux network namespaces with passwordless sudo are unavailable")
+@unittest.skipUnless(NamespaceLab.supported(), "Linux network namespaces and admin privilege are unavailable")
 class RoutedLinuxRuntimeTests(unittest.TestCase):
     runtime_probe_reason: str | None = None
     md5sig_probe_reason: str | None = None
