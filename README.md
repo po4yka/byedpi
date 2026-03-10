@@ -17,7 +17,7 @@ make fuzz-packets
 - `make test` runs Rust-owned `ciadpi-packets` packet regressions/exercise coverage plus black-box SOCKS/HTTP CONNECT/TLS proxy tests
 - `make test` also runs runtime parity checks for AUTO/cache promotion and reuse, cache-backed connect fallback, `redirect`, `ssl_err`, and `torst` replay behavior, plus partial-TLS timeout count and byte-limit handling
 - `make test` also runs Linux socket-feature tests for `--transparent` and `--protect-path` when the required namespace and packet-filter tooling is available
-- `make test` builds the Rust `ciadpi` artifact and runs the Rust-owned workspace/unit coverage (`cargo test --workspace --lib --bins`, the committed-fixture `oracle_diff` integrations, `ciadpi-bin` CLI integration, and desync action planning)
+- `make test` builds the Rust `ciadpi` artifact and runs the Rust-owned workspace/unit coverage (`cargo test --workspace --lib --bins`, the committed-fixture `oracle_diff` integrations, `ciadpi-bin` CLI integration, `ciadpi-bin` live runtime integration, and desync action planning)
 - `make test` runs the AUTO/cache runtime parity, transparent/protect-path socket-feature suite, Rust-only proxy subset, and runtime-migration coverage against the default Rust `ciadpi` binary
 - `make test` also runs a Rust-only proxy subset for SOCKS4, SOCKS5 CONNECT, SOCKS5 UDP associate, HTTP CONNECT, UDP fake bursts, TLS tunnel relay, churn, no-domain/no-udp rejection, connect failure handling, SOCKS chaining, and IPv6 where available
 - `make test` also runs Rust runtime-migration coverage for pidfile handling, TCP Fast Open, delayed connect, cache stdout dumping, max-conn admission, and Shadowsocks env startup

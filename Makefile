@@ -53,6 +53,7 @@ test-linux-runtime-features: $(TARGET)
 test-rust: test-rust-oracle-diff Cargo.toml
 	$(CARGO) test --workspace --lib --bins
 	$(CARGO) test -p ciadpi-bin --test cli
+	$(CARGO) test -p ciadpi-bin --test runtime_integration
 	$(CARGO) test -p ciadpi-desync --test action_planning
 
 test-rust-oracle-diff: packets-corpus Cargo.toml
