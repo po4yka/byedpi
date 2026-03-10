@@ -8,6 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rcgen::generate_simple_self_signed;
+use rustls::pki_types::{PrivateKeyDer, ServerName};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned};
+
 fn rust_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ciadpi")
 }
@@ -37,7 +41,7 @@ fn recv_exact(stream: &mut TcpStream, size: usize) -> Vec<u8> {
     buf
 }
 
-fn recv_until(stream: &mut TcpStream, marker: &[u8]) -> Vec<u8> {
+fn recv_until(stream: &mut impl Read, marker: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     while !buf.ends_with(marker) && !buf.windows(marker.len()).any(|window| window == marker) {
@@ -456,6 +460,91 @@ impl Drop for RecordingUdpServer {
     }
 }
 
+struct TlsHttpServer {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+    cert_der: rustls::pki_types::CertificateDer<'static>,
+}
+
+impl TlsHttpServer {
+    fn start() -> Self {
+        let certified = generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate self-signed tls cert");
+        let cert_der = certified.cert.der().clone();
+        let key_der = PrivateKeyDer::Pkcs8(certified.key_pair.serialize_der().into());
+        let server_config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert_der.clone()], key_der)
+                .expect("build tls server config"),
+        );
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind tls http server");
+        listener
+            .set_nonblocking(true)
+            .expect("set tls http server nonblocking");
+        let addr = listener.local_addr().expect("tls http server addr");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = stop.clone();
+        let handle = thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let config = server_config.clone();
+                        thread::spawn(move || {
+                            let connection =
+                                ServerConnection::new(config).expect("create tls server connection");
+                            let mut stream = StreamOwned::new(connection, stream);
+                            let request = recv_until(&mut stream, b"\r\n\r\n");
+                            assert!(
+                                request.windows(b"GET / HTTP/1.1".len())
+                                    .any(|window| window == b"GET / HTTP/1.1"),
+                                "unexpected TLS request payload: {:?}",
+                                String::from_utf8_lossy(&request)
+                            );
+                            stream
+                                .write_all(
+                                    b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nproxy tls ok",
+                                )
+                                .expect("write tls http response");
+                            stream.flush().expect("flush tls http response");
+                        });
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            addr,
+            stop,
+            handle: Some(handle),
+            cert_der,
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    fn cert_der(&self) -> rustls::pki_types::CertificateDer<'static> {
+        self.cert_der.clone()
+    }
+}
+
+impl Drop for TlsHttpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.addr);
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("join tls http listener");
+        }
+    }
+}
+
 fn relay_pipe(mut src: TcpStream, mut dst: TcpStream) {
     let mut buf = [0u8; 4096];
     loop {
@@ -714,6 +803,41 @@ fn socks5_ipv6_echo_round_trip() {
     let payload = b"plain socks ipv6 payload";
     stream.write_all(payload).expect("write ipv6 echo payload");
     assert_eq!(recv_exact(&mut stream, payload.len()), payload);
+}
+
+#[test]
+fn socks5_tls_tunnel_round_trip() {
+    let tls_server = TlsHttpServer::start();
+    let proxy = ProxyProcess::start(&[]);
+    let raw_stream = socks_connect(proxy.port, tls_server.port());
+
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(tls_server.cert_der())
+        .expect("add tls server cert to roots");
+    let client_config = Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let server_name = ServerName::try_from("localhost")
+        .expect("valid tls server name")
+        .to_owned();
+    let connection =
+        ClientConnection::new(client_config, server_name).expect("create tls client connection");
+    let mut tls_stream = StreamOwned::new(connection, raw_stream);
+
+    tls_stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write tls http request");
+    let response = recv_until(&mut tls_stream, b"proxy tls ok");
+    assert!(
+        response.windows(b"HTTP/1.1 200 OK".len())
+            .any(|window| window == b"HTTP/1.1 200 OK"),
+        "unexpected tls tunnel response: {:?}",
+        String::from_utf8_lossy(&response)
+    );
+    assert!(response.ends_with(b"proxy tls ok"));
 }
 
 #[test]
