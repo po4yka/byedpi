@@ -12,6 +12,9 @@ use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 
+#[cfg(unix)]
+use libc::{kill, SIGTERM};
+
 fn rust_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ciadpi")
 }
@@ -33,6 +36,14 @@ fn unique_log_path() -> PathBuf {
         "ciadpi-runtime-integration-{}-{nanos}.log",
         std::process::id()
     ))
+}
+
+fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{}-{nanos}{suffix}", std::process::id()))
 }
 
 fn recv_exact(stream: &mut TcpStream, size: usize) -> Vec<u8> {
@@ -624,6 +635,64 @@ impl Drop for UpstreamSocksServer {
     }
 }
 
+struct FailingSocksServer {
+    addr: SocketAddr,
+    attempts: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl FailingSocksServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind failing socks");
+        listener
+            .set_nonblocking(true)
+            .expect("set failing socks nonblocking");
+        let addr = listener.local_addr().expect("failing socks addr");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let attempts_ref = attempts.clone();
+        let stop_flag = stop.clone();
+        let handle = thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((_client, _)) => {
+                        attempts_ref.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            addr,
+            attempts,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for FailingSocksServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.addr);
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("join failing socks listener");
+        }
+    }
+}
+
 fn handle_upstream_socks_client(client: &mut TcpStream) -> std::io::Result<()> {
     let methods_len = recv_exact(client, 2);
     if methods_len.first().copied() != Some(0x05) {
@@ -770,6 +839,27 @@ impl ProxyProcess {
 
     fn read_log(&self) -> String {
         fs::read_to_string(&self.log_path).unwrap_or_default()
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    #[cfg(unix)]
+    fn terminate(&mut self) {
+        if self.child.try_wait().expect("poll proxy status").is_none() {
+            let rc = unsafe { kill(self.child.id() as i32, SIGTERM) };
+            assert_eq!(rc, 0, "send SIGTERM to proxy");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if self.child.try_wait().expect("poll proxy status").is_some() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -1081,4 +1171,57 @@ fn shadowsocks_env_mode_tunnels_initial_payload() {
         .write_all(&request)
         .expect("write shadowsocks bootstrap request");
     assert_eq!(recv_exact(&mut stream, payload.len()), payload);
+}
+
+#[cfg(unix)]
+#[test]
+fn pidfile_is_created_and_removed() {
+    let pidfile = unique_temp_path("ciadpi-pidfile", ".pid");
+    let pidfile_arg = pidfile.display().to_string();
+    let mut proxy = ProxyProcess::start(&["--pidfile", &pidfile_arg]);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !pidfile.exists() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(pidfile.exists(), "pidfile was not created:\n{}", proxy.read_log());
+    let pid_text = fs::read_to_string(&pidfile).expect("read pidfile");
+    assert_eq!(pid_text.trim(), proxy.pid().to_string());
+
+    proxy.terminate();
+    assert!(
+        !pidfile.exists(),
+        "pidfile was not removed after shutdown:\n{}",
+        proxy.read_log()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_file_stdout_dumps_entries_on_shutdown() {
+    let echo = EchoServer::start();
+    let failing = FailingSocksServer::start();
+    let mut proxy = ProxyProcess::start_owned(vec![
+        "--to-socks5".to_string(),
+        format!("127.0.0.1:{}", failing.port()),
+        "--auto".to_string(),
+        "conn".to_string(),
+        "--cache-file".to_string(),
+        "-".to_string(),
+        "--cache-ttl".to_string(),
+        "60".to_string(),
+    ]);
+
+    let mut stream = socks_connect(proxy.port, echo.port());
+    stream.write_all(b"cache").expect("write cache payload");
+    assert_eq!(recv_exact(&mut stream, 5), b"cache");
+    drop(stream);
+    assert_eq!(failing.attempts(), 1, "failing upstream was not attempted exactly once");
+
+    proxy.terminate();
+    let log = proxy.read_log();
+    assert!(
+        log.contains(&format!(" 127.0.0.1 32 {} ", echo.port())),
+        "cache dump missing expected entry:\n{log}"
+    );
 }
