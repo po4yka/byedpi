@@ -128,7 +128,7 @@ impl SessionState {
         }
     }
 
-    pub fn observe_inbound(&mut self, payload: &[u8]) -> Option<TriggerEvent> {
+    pub fn observe_inbound(&mut self, payload: &[u8]) {
         self.recv_count += payload.len();
         self.sent_this_round = 0;
         if self.saw_tls_client_hello
@@ -136,7 +136,6 @@ impl SessionState {
         {
             self.saw_tls_client_hello = false;
         }
-        None
     }
 }
 
@@ -488,7 +487,7 @@ mod tests {
         assert_eq!(state.round_count, 1);
         assert_eq!(state.sent_this_round, 10);
 
-        assert_eq!(state.observe_inbound(b"reply"), None);
+        state.observe_inbound(b"reply");
         assert_eq!(state.recv_count, 5);
         assert_eq!(state.sent_this_round, 0);
 

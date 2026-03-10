@@ -81,7 +81,11 @@ impl RuntimeCache {
         }
     }
 
-    pub fn lookup(&mut self, config: &RuntimeConfig, dest: SocketAddr) -> Option<ConnectionRoute> {
+    pub fn lookup_and_prune(
+        &mut self,
+        config: &RuntimeConfig,
+        dest: SocketAddr,
+    ) -> Option<ConnectionRoute> {
         let now = now_unix();
         self.records
             .retain(|record| !is_expired(config, record, now));
@@ -288,7 +292,7 @@ pub fn select_initial_group(
     payload: Option<&[u8]>,
     allow_unknown_payload: bool,
 ) -> Option<ConnectionRoute> {
-    if let Some(route) = cache.lookup(config, dest) {
+    if let Some(route) = cache.lookup_and_prune(config, dest) {
         let group = config.groups.get(route.group_index)?;
         if group_matches(group, dest, payload, allow_unknown_payload) {
             return Some(route);
@@ -515,7 +519,7 @@ mod tests {
             order: vec![0],
         };
 
-        assert!(cache.lookup(&config, dest).is_none());
+        assert!(cache.lookup_and_prune(&config, dest).is_none());
         assert!(cache.records.is_empty());
     }
 

@@ -1,7 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use ciadpi_config::{parse_cli, ConfigError, ParseOutcome, StartupEnv, VERSION};
+use ciadpi_config::{parse_cli, ConfigError, ParseResult, StartupEnv, VERSION};
 
 mod platform;
 mod process;
@@ -160,20 +160,19 @@ fn run_args(args: Vec<String>) -> i32 {
         }
     };
 
-    match parsed.outcome {
-        ParseOutcome::Help => {
+    match parsed {
+        ParseResult::Help => {
             print!("{}", help_text());
             0
         }
-        ParseOutcome::Version => {
+        ParseResult::Version => {
             println!("{VERSION}");
             0
         }
-        ParseOutcome::Run => {
+        ParseResult::Run(config) => {
             if env::var_os("CIADPI_RS_DRY_RUN").is_some() {
                 return 0;
             }
-            let config = parsed.config.expect("runtime config");
             let _process = match process::ProcessGuard::prepare(&config) {
                 Ok(guard) => guard,
                 Err(err) => {

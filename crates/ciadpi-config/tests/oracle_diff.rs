@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 
 use ciadpi_config::{
     dump_cache_entries, load_cache_entries, parse_cli, parse_hosts_spec, parse_ipset_spec,
-    FilterSet, ParseOutcome, StartupEnv,
+    FilterSet, ParseResult, StartupEnv,
 };
 use serde_json::Value;
 #[cfg(target_os = "linux")]
@@ -42,9 +42,10 @@ fn fixture(case: &str) -> &'static Value {
 
 fn parse_runtime(args: &[&str], startup: StartupEnv) -> ciadpi_config::RuntimeConfig {
     let args: Vec<String> = args.iter().map(|value| (*value).to_owned()).collect();
-    let parsed = parse_cli(&args, &startup).expect("rust parse");
-    assert_eq!(parsed.outcome, ParseOutcome::Run);
-    parsed.config.expect("runtime config")
+    match parse_cli(&args, &startup).expect("rust parse") {
+        ParseResult::Run(config) => config,
+        other => panic!("expected runtime config, got {other:?}"),
+    }
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use ciadpi_config::{parse_cli, DesyncMode, ParseOutcome, RuntimeConfig, StartupEnv};
+use ciadpi_config::{parse_cli, DesyncMode, ParseResult, RuntimeConfig, StartupEnv};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use ciadpi_desync::build_fake_packet;
 use ciadpi_desync::{plan_tcp, plan_udp, DesyncAction};
@@ -26,9 +26,10 @@ fn fixture(case: &str) -> &'static Value {
 
 fn parse_group(args: &[&str]) -> (RuntimeConfig, usize) {
     let args: Vec<String> = args.iter().map(|value| (*value).to_owned()).collect();
-    let parsed = parse_cli(&args, &StartupEnv::default()).expect("parse config");
-    assert_eq!(parsed.outcome, ParseOutcome::Run);
-    let config = parsed.config.expect("config");
+    let config = match parse_cli(&args, &StartupEnv::default()).expect("parse config") {
+        ParseResult::Run(config) => config,
+        other => panic!("expected runtime config, got {other:?}"),
+    };
     let idx = config.actionable_group();
     (config, idx)
 }

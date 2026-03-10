@@ -259,17 +259,11 @@ impl StartupEnv {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParseOutcome {
-    Run,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseResult {
+    Run(RuntimeConfig),
     Help,
     Version,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseResult {
-    pub outcome: ParseOutcome,
-    pub config: Option<RuntimeConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -652,16 +646,10 @@ pub fn parse_cli(args: &[String], startup: &StartupEnv) -> Result<ParseResult, C
 
         match arg.as_str() {
             "-h" | "--help" => {
-                return Ok(ParseResult {
-                    outcome: ParseOutcome::Help,
-                    config: None,
-                })
+                return Ok(ParseResult::Help)
             }
             "-v" | "--version" => {
-                return Ok(ParseResult {
-                    outcome: ParseOutcome::Version,
-                    config: None,
-                })
+                return Ok(ParseResult::Version)
             }
             "-N" | "--no-domain" => config.resolve = false,
             "-X" => config.ipv6 = false,
@@ -1023,10 +1011,7 @@ pub fn parse_cli(args: &[String], startup: &StartupEnv) -> Result<ParseResult, C
         config.ipv6 = false;
     }
 
-    Ok(ParseResult {
-        outcome: ParseOutcome::Run,
-        config: Some(config),
-    })
+    Ok(ParseResult::Run(config))
 }
 
 fn common_suffix_match(host: &str, rule: &str) -> bool {
