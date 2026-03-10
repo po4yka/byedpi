@@ -104,7 +104,7 @@ impl PidFileGuard {
             .open(path)?;
 
         let mut lock = libc::flock {
-            l_type: libc::F_WRLCK as i16,
+            l_type: libc::F_WRLCK,
             l_whence: libc::SEEK_CUR as i16,
             l_start: 0,
             l_len: 0,

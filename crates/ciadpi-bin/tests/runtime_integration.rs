@@ -1053,26 +1053,23 @@ fn max_conn_limit_rejects_excess_connections() {
     let proxy = ProxyProcess::start(&["--max-conn", "1"]);
     let deadline = Instant::now() + Duration::from_secs(2);
     let first = loop {
-        match TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port)) {
-            Ok(mut stream) => {
-                stream
-                    .write_all(b"\x05\x01\x00")
-                    .expect("write initial auth negotiation");
-                let mut auth_reply = [0u8; 2];
-                match stream.read(&mut auth_reply) {
-                    Ok(2) if auth_reply == [0x05, 0x00] => {
-                        let mut request = Vec::from([0x05, 0x01, 0x00, 0x01]);
-                        request.extend(Ipv4Addr::LOCALHOST.octets());
-                        request.extend(echo.port().to_be_bytes());
-                        stream.write_all(&request).expect("write first connect request");
-                        let reply = recv_socks5_reply(&mut stream);
-                        assert_eq!(reply[1], 0, "SOCKS5 connect failed: {reply:?}");
-                        break stream;
-                    }
-                    Ok(_) | Err(_) => {}
+        if let Ok(mut stream) = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port)) {
+            stream
+                .write_all(b"\x05\x01\x00")
+                .expect("write initial auth negotiation");
+            let mut auth_reply = [0u8; 2];
+            match stream.read(&mut auth_reply) {
+                Ok(2) if auth_reply == [0x05, 0x00] => {
+                    let mut request = Vec::from([0x05, 0x01, 0x00, 0x01]);
+                    request.extend(Ipv4Addr::LOCALHOST.octets());
+                    request.extend(echo.port().to_be_bytes());
+                    stream.write_all(&request).expect("write first connect request");
+                    let reply = recv_socks5_reply(&mut stream);
+                    assert_eq!(reply[1], 0, "SOCKS5 connect failed: {reply:?}");
+                    break stream;
                 }
+                Ok(_) | Err(_) => {}
             }
-            Err(_) => {}
         }
         assert!(Instant::now() < deadline, "timed out acquiring first max-conn slot");
         thread::sleep(Duration::from_millis(50));
@@ -1088,13 +1085,12 @@ fn max_conn_limit_rejects_excess_connections() {
     let mut auth_reply = [0u8; 2];
     let read_result = second.read(&mut auth_reply);
     drop(first);
-    match read_result {
-        Ok(2) => assert_ne!(
+    if let Ok(2) = read_result {
+        assert_ne!(
             auth_reply,
             [0x05, 0x00],
             "max-conn allowed second SOCKS auth reply"
-        ),
-        Ok(_) | Err(_) => {}
+        );
     }
 }
 

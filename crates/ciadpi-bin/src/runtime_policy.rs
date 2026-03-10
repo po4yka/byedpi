@@ -4,8 +4,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ciadpi_config::{
-    dump_cache_entries, load_cache_entries_from_path, CacheEntry, DesyncGroup, RuntimeConfig,
-    AUTO_NOPOST, AUTO_SORT, DETECT_RECONN,
+    dump_cache_entries, load_cache_entries_from_path, prefix_match_bytes, CacheEntry, DesyncGroup,
+    RuntimeConfig, AUTO_NOPOST, AUTO_SORT, DETECT_RECONN,
 };
 use ciadpi_packets::{
     is_http, is_tls_client_hello, parse_http, parse_tls, IS_HTTP, IS_HTTPS, IS_IPV4, IS_TCP, IS_UDP,
@@ -438,26 +438,13 @@ fn cache_matches(entry: &CacheEntry, dest: SocketAddr) -> bool {
     }
     match (entry.addr, dest.ip()) {
         (IpAddr::V4(lhs), IpAddr::V4(rhs)) => {
-            prefix_match(&lhs.octets(), &rhs.octets(), entry.bits as u8)
+            prefix_match_bytes(&lhs.octets(), &rhs.octets(), entry.bits as u8)
         }
         (IpAddr::V6(lhs), IpAddr::V6(rhs)) => {
-            prefix_match(&lhs.octets(), &rhs.octets(), entry.bits as u8)
+            prefix_match_bytes(&lhs.octets(), &rhs.octets(), entry.bits as u8)
         }
         _ => false,
     }
-}
-
-fn prefix_match(lhs: &[u8], rhs: &[u8], bits: u8) -> bool {
-    let full_bytes = (bits / 8) as usize;
-    let rem = bits % 8;
-    if lhs.get(..full_bytes) != rhs.get(..full_bytes) {
-        return false;
-    }
-    if rem == 0 {
-        return true;
-    }
-    let mask = 0xffu8 << (8 - rem);
-    lhs[full_bytes] & mask == rhs[full_bytes] & mask
 }
 
 fn is_expired(config: &RuntimeConfig, record: &CacheRecord, now: i64) -> bool {
@@ -485,4 +472,109 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_dest(port: u16) -> SocketAddr {
+        SocketAddr::from(([203, 0, 113, 10], port))
+    }
+
+    fn config_with_groups(groups: Vec<DesyncGroup>) -> RuntimeConfig {
+        RuntimeConfig {
+            groups,
+            ..RuntimeConfig::default()
+        }
+    }
+
+    #[test]
+    fn lookup_prunes_expired_records() {
+        let dest = sample_dest(443);
+        let mut group = DesyncGroup::new(0);
+        group.cache_ttl = 1;
+        let config = config_with_groups(vec![group]);
+        let mut cache = RuntimeCache {
+            records: vec![CacheRecord {
+                entry: CacheEntry {
+                    addr: dest.ip(),
+                    bits: 32,
+                    port: dest.port(),
+                    time: now_unix() - 5,
+                    host: None,
+                },
+                group_index: 0,
+                attempted_mask: 0,
+            }],
+            groups: vec![GroupPolicy {
+                detect: 0,
+                fail_count: 0,
+                pri: 0,
+            }],
+            order: vec![0],
+        };
+
+        assert!(cache.lookup(&config, dest).is_none());
+        assert!(cache.records.is_empty());
+    }
+
+    #[test]
+    fn select_initial_group_skips_detect_only_groups() {
+        let mut first = DesyncGroup::new(0);
+        first.detect = DETECT_RECONN;
+        let second = DesyncGroup::new(1);
+        let config = config_with_groups(vec![first, second]);
+        let mut cache = RuntimeCache::load(&config);
+
+        let route = select_initial_group(&config, &mut cache, sample_dest(80), None, true)
+            .expect("fallback route");
+
+        assert_eq!(route.group_index, 1);
+        assert_eq!(route.attempted_mask, 0);
+    }
+
+    #[test]
+    fn select_next_group_advances_to_matching_trigger_group() {
+        let first = DesyncGroup::new(0);
+        let mut second = DesyncGroup::new(1);
+        second.detect = DETECT_RECONN;
+        let config = config_with_groups(vec![first, second]);
+        let cache = RuntimeCache::load(&config);
+        let route = ConnectionRoute {
+            group_index: 0,
+            attempted_mask: 0,
+        };
+
+        let next = select_next_group(
+            &config,
+            &cache,
+            &route,
+            sample_dest(443),
+            None,
+            DETECT_RECONN,
+            true,
+        )
+        .expect("next route");
+
+        assert_eq!(next.group_index, 1);
+        assert_eq!(next.attempted_mask, config.groups[0].bit);
+    }
+
+    #[test]
+    fn route_matches_payload_checks_host_filters() {
+        let mut group = DesyncGroup::new(0);
+        group.filters.hosts.push("example.com".to_string());
+        let config = config_with_groups(vec![group]);
+        let matching = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let non_matching = b"GET / HTTP/1.1\r\nHost: other.example\r\n\r\n";
+
+        assert!(route_matches_payload(&config, 0, sample_dest(80), matching));
+        assert!(!route_matches_payload(
+            &config,
+            0,
+            sample_dest(80),
+            non_matching,
+        ));
+    }
 }

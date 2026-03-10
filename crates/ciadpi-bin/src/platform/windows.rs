@@ -175,25 +175,14 @@ pub fn send_fake_tcp(
     md5sig: bool,
     default_ttl: u8,
 ) -> io::Result<()> {
-    if ttl != 0 {
-        let socket = socket2::SockRef::from(stream);
-        let _ = socket.set_ttl(ttl as u32);
-        let _ = socket.set_unicast_hops_v6(ttl as u32);
-    }
-    if md5sig {
-        let _ = set_tcp_md5sig(stream, 5);
-    }
-    let mut writer = stream.try_clone()?;
-    std::io::Write::write_all(&mut writer, fake_prefix)?;
-    if md5sig {
-        let _ = set_tcp_md5sig(stream, 0);
-    }
-    if default_ttl != 0 {
-        let socket = socket2::SockRef::from(stream);
-        let _ = socket.set_ttl(default_ttl as u32);
-        let _ = socket.set_unicast_hops_v6(default_ttl as u32);
-    }
-    Ok(())
+    super::fallback::send_fake_tcp_best_effort(
+        stream,
+        fake_prefix,
+        ttl,
+        md5sig,
+        default_ttl,
+        set_tcp_md5sig,
+    )
 }
 
 pub fn wait_tcp_stage(

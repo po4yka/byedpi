@@ -12,3 +12,6 @@ target/
 .agent/
 .ralph-loop/
 .worktrees/
+.desloppify/
+.agents/skills/desloppify/
+scorecard.png

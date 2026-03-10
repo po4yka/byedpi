@@ -7,6 +7,9 @@ use socket2::{Domain, Protocol, Socket, Type};
 #[cfg(target_os = "linux")]
 mod linux;
 
+#[cfg(not(target_os = "linux"))]
+mod fallback;
+
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod stub;
 

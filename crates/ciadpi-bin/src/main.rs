@@ -24,6 +24,8 @@ fn help_text() -> String {
     text.push_str("    -c, --max-conn <count>    Connection count limit, default 512\n");
     text.push_str("    -N, --no-domain           Deny domain resolving\n");
     text.push_str("    -U, --no-udp              Deny UDP association\n");
+    text.push_str("    -X                        Disable IPv6 listener and target support\n");
+    text.push_str("    -G, --http-connect        Accept HTTP CONNECT proxy requests\n");
     text.push_str("    -I  --conn-ip <ip>        Connection binded IP, default ::\n");
     text.push_str("    -b, --buf-size <size>     Buffer size, default 16384\n");
     text.push_str("    -x, --debug <level>       Print logs, 0, 1 or 2\n");
@@ -36,12 +38,13 @@ fn help_text() -> String {
     text.push_str(
         "                              Detect: torst,redirect,ssl_err,none,conn,keep,pri=<num>\n",
     );
-    text.push_str("    -L, --auto-mode <s>       Mode: sort\n");
+    text.push_str("    -L, --auto-mode <modes>   Modes: 0,1,2,3,s,r\n");
     text.push_str(
         "    -T, --timeout <s[:p:c:b]> Timeout waiting for response, after which trigger auto\n",
     );
     text.push_str("    -y, --cache-file <path|-> Dump cache to file or stdout\n");
     text.push_str("    -u, --cache-ttl <sec>     Lifetime of cached desync params for IP\n");
+    text.push_str("        --cache-merge <bits>  Merge cache entries by IPv4 prefix bits\n");
     text.push_str("    -K, --proto <t,h,u,i>     Protocol whitelist: tls,http,udp,ipv4\n");
     text.push_str("    -H, --hosts <file|:str>   Hosts whitelist, filename or :string\n");
     text.push_str("    -j, --ipset <file|:str>   IP whitelist\n");
@@ -72,6 +75,11 @@ fn help_text() -> String {
         text.push_str("                              Replaced: ? - rand let, # - rand num, * - rand let/num\n");
     }
     text.push_str("    -t, --ttl <num>           TTL of fake packets, default 8\n");
+    text.push_str("    -Z, --wait-send           Wait for TCP send queue before next step\n");
+    text.push_str("    -W, --await-int <ms>      Poll interval while waiting for send queue\n");
+    text.push_str("    -C, --to-socks5 <ip:port> Chain upstream traffic through SOCKS5\n");
+    text.push_str("    -P, --protect-path <path> Route sockets through a protect service\n");
+    text.push_str("        --comment <text>      Label the current desync group for cache output\n");
     text.push_str("    -O, --fake-offset <pos_t> Fake data start offset\n");
     text.push_str("    -l, --fake-data <f|:str>  Set custom fake packet\n");
     text.push_str("    -Q, --fake-tls-mod <flag> Modify fake TLS CH: rand,orig,msize=<int>\n");
@@ -202,4 +210,43 @@ fn run() -> i32 {
 
 fn main() {
     std::process::exit(run());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical_option, help_text};
+
+    #[test]
+    fn canonical_option_normalizes_known_aliases() {
+        assert_eq!(canonical_option("--ip"), "-i");
+        assert_eq!(canonical_option("--cache-file"), "-y");
+        assert_eq!(canonical_option("--cache-merge"), "--cache-merge");
+        assert_eq!(canonical_option("--unknown"), "--unknown");
+    }
+
+    #[test]
+    fn help_text_mentions_extended_parser_options() {
+        let help = help_text();
+        for option in [
+            "-X",
+            "--http-connect",
+            "--cache-merge",
+            "--wait-send",
+            "--await-int",
+            "--to-socks5",
+            "--protect-path",
+            "--comment",
+        ] {
+            assert!(
+                help.contains(option),
+                "help text should document parser option {option}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_text_describes_full_auto_mode_surface() {
+        let help = help_text();
+        assert!(help.contains("Modes: 0,1,2,3,s,r"));
+    }
 }

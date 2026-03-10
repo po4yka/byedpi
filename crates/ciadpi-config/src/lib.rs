@@ -1052,17 +1052,17 @@ impl Cidr {
     pub fn matches(&self, ip: IpAddr) -> bool {
         match (self.addr, ip) {
             (IpAddr::V4(lhs), IpAddr::V4(rhs)) => {
-                prefix_match(&lhs.octets(), &rhs.octets(), self.bits)
+                prefix_match_bytes(&lhs.octets(), &rhs.octets(), self.bits)
             }
             (IpAddr::V6(lhs), IpAddr::V6(rhs)) => {
-                prefix_match(&lhs.octets(), &rhs.octets(), self.bits)
+                prefix_match_bytes(&lhs.octets(), &rhs.octets(), self.bits)
             }
             _ => false,
         }
     }
 }
 
-fn prefix_match(lhs: &[u8], rhs: &[u8], bits: u8) -> bool {
+pub fn prefix_match_bytes(lhs: &[u8], rhs: &[u8], bits: u8) -> bool {
     let full_bytes = (bits / 8) as usize;
     let rem = bits % 8;
     if lhs.get(..full_bytes) != rhs.get(..full_bytes) {
