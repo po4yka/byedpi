@@ -625,10 +625,10 @@ mod tests {
     #[test]
     fn invalid_fds_report_errors_for_tcp_state_helpers() {
         let err = tcp_has_notsent(-1).expect_err("invalid fd should fail");
-        assert_eq!(err.kind(), io::ErrorKind::Uncategorized);
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
 
         let err = wait_tcp_stage_fd(-1, false, Duration::ZERO).expect_err("invalid fd should fail");
-        assert_eq!(err.kind(), io::ErrorKind::Uncategorized);
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
     }
 
     #[test]
