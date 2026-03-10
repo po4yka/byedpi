@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -456,6 +456,141 @@ impl Drop for RecordingUdpServer {
     }
 }
 
+fn relay_pipe(mut src: TcpStream, mut dst: TcpStream) {
+    let mut buf = [0u8; 4096];
+    loop {
+        match src.read(&mut buf) {
+            Ok(0) => return,
+            Ok(read) => {
+                if dst.write_all(&buf[..read]).is_err() {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+struct UpstreamSocksServer {
+    addr: SocketAddr,
+    attempts: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl UpstreamSocksServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind upstream socks");
+        listener
+            .set_nonblocking(true)
+            .expect("set upstream socks nonblocking");
+        let addr = listener.local_addr().expect("upstream socks addr");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let attempts_ref = attempts.clone();
+        let stop_flag = stop.clone();
+        let handle = thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut client, _)) => {
+                        let attempts_ref = attempts_ref.clone();
+                        thread::spawn(move || {
+                            attempts_ref.fetch_add(1, Ordering::Relaxed);
+                            if handle_upstream_socks_client(&mut client).is_err() {
+                                let _ = client.shutdown(Shutdown::Both);
+                            }
+                        });
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            addr,
+            attempts,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for UpstreamSocksServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.addr);
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("join upstream socks listener");
+        }
+    }
+}
+
+fn handle_upstream_socks_client(client: &mut TcpStream) -> std::io::Result<()> {
+    let methods_len = recv_exact(client, 2);
+    if methods_len.first().copied() != Some(0x05) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected upstream socks version",
+        ));
+    }
+    let method_count = methods_len[1] as usize;
+    let _ = recv_exact(client, method_count);
+    client.write_all(b"\x05\x00")?;
+
+    let header = recv_exact(client, 4);
+    if header[0] != 0x05 || header[1] != 0x01 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected upstream socks command",
+        ));
+    }
+    let target = match header[3] {
+        0x01 => {
+            let addr = recv_exact(client, 6);
+            SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3])),
+                u16::from_be_bytes([addr[4], addr[5]]),
+            )
+        }
+        0x04 => {
+            let addr = recv_exact(client, 18);
+            SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::from([
+                    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr[6], addr[7],
+                    addr[8], addr[9], addr[10], addr[11], addr[12], addr[13], addr[14], addr[15],
+                ])),
+                u16::from_be_bytes([addr[16], addr[17]]),
+            )
+        }
+        atyp => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported upstream socks atyp: {atyp}"),
+            ))
+        }
+    };
+
+    let upstream = TcpStream::connect(target)?;
+    client.write_all(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")?;
+
+    let upstream_reader = upstream.try_clone()?;
+    let client_reader = client.try_clone()?;
+    let to_client = thread::spawn(move || relay_pipe(upstream_reader, client_reader));
+    relay_pipe(client.try_clone()?, upstream);
+    let _ = to_client.join();
+    Ok(())
+}
+
 struct ProxyProcess {
     port: u16,
     child: Child,
@@ -761,6 +896,32 @@ fn connection_churn_echo_round_trip() {
             .expect("write churn payload");
         assert_eq!(recv_exact(&mut stream, payload.len()), payload.as_bytes());
     }
+}
+
+#[test]
+fn delay_conn_waits_for_first_payload_before_upstream_connect() {
+    let echo = EchoServer::start();
+    let upstream = UpstreamSocksServer::start();
+    let proxy = ProxyProcess::start_owned(vec![
+        "--hosts".to_string(),
+        ":delayed.example.test".to_string(),
+        "--to-socks5".to_string(),
+        format!("127.0.0.1:{}", upstream.port()),
+    ]);
+    let mut stream = socks_connect(proxy.port, echo.port());
+    assert_eq!(upstream.attempts(), 0, "upstream connected before payload");
+
+    let payload = b"GET / HTTP/1.1\r\nHost: delayed.example.test\r\n\r\n";
+    stream
+        .write_all(payload)
+        .expect("write delayed-connect payload");
+    assert_eq!(recv_exact(&mut stream, payload.len()), payload);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && upstream.attempts() == 0 {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(upstream.attempts(), 1, "upstream connect did not occur after payload");
 }
 
 #[test]
