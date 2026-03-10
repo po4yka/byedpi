@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, Tc
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -34,6 +34,17 @@ fn unique_log_path() -> PathBuf {
 fn recv_exact(stream: &mut TcpStream, size: usize) -> Vec<u8> {
     let mut buf = vec![0u8; size];
     stream.read_exact(&mut buf).expect("read exact bytes");
+    buf
+}
+
+fn recv_until(stream: &mut TcpStream, marker: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while !buf.ends_with(marker) && !buf.windows(marker.len()).any(|window| window == marker) {
+        let read = stream.read(&mut chunk).expect("read until marker");
+        assert_ne!(read, 0, "stream closed before marker");
+        buf.extend_from_slice(&chunk[..read]);
+    }
     buf
 }
 
@@ -72,6 +83,17 @@ fn socks_connect(proxy_port: u16, dst_port: u16) -> TcpStream {
     stream.write_all(&request).expect("write socks5 connect");
     let reply = recv_socks5_reply(&mut stream);
     assert_eq!(reply[1], 0, "SOCKS5 connect failed: {reply:?}");
+    stream
+}
+
+fn socks_connect_ipv6(proxy_port: u16, host: Ipv6Addr, dst_port: u16) -> TcpStream {
+    let mut stream = socks_auth(proxy_port);
+    let mut request = Vec::from([0x05, 0x01, 0x00, 0x04]);
+    request.extend(host.octets());
+    request.extend(dst_port.to_be_bytes());
+    stream.write_all(&request).expect("write socks5 ipv6 connect");
+    let reply = recv_socks5_reply(&mut stream);
+    assert_eq!(reply[1], 0, "SOCKS5 IPv6 connect failed: {reply:?}");
     stream
 }
 
@@ -123,6 +145,15 @@ fn http_connect(proxy_port: u16, dst_port: u16) -> TcpStream {
         "http connect failed: {response}"
     );
     stream
+}
+
+fn http_connect_raw(proxy_port: u16, request: &str) -> String {
+    let mut stream =
+        TcpStream::connect((Ipv4Addr::LOCALHOST, proxy_port)).expect("connect to proxy");
+    stream
+        .write_all(request.as_bytes())
+        .expect("write raw http connect request");
+    String::from_utf8(recv_until(&mut stream, b"\r\n\r\n")).expect("utf8 http connect reply")
 }
 
 fn parse_socks5_reply_addr(reply: &[u8]) -> SocketAddr {
@@ -243,6 +274,68 @@ impl Drop for EchoServer {
     }
 }
 
+struct EchoServerV6 {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl EchoServerV6 {
+    fn start() -> Option<Self> {
+        let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).ok()?;
+        listener.set_nonblocking(true).ok()?;
+        let addr = listener.local_addr().ok()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = stop.clone();
+        let handle = thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        thread::spawn(move || {
+                            let mut buf = [0u8; 4096];
+                            loop {
+                                match stream.read(&mut buf) {
+                                    Ok(0) => return,
+                                    Ok(read) => {
+                                        if stream.write_all(&buf[..read]).is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                                    Err(_) => return,
+                                }
+                            }
+                        });
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Some(Self {
+            addr,
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+}
+
+impl Drop for EchoServerV6 {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.addr);
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("join ipv6 echo listener");
+        }
+    }
+}
+
 struct UdpEchoServer {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -297,6 +390,72 @@ impl Drop for UdpEchoServer {
     }
 }
 
+struct RecordingUdpServer {
+    addr: SocketAddr,
+    packets: Arc<Mutex<Vec<Vec<u8>>>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl RecordingUdpServer {
+    fn start() -> Self {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind recording udp server");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("set recording udp timeout");
+        let addr = socket.local_addr().expect("recording udp listener addr");
+        let stop = Arc::new(AtomicBool::new(false));
+        let packets = Arc::new(Mutex::new(Vec::new()));
+        let stop_flag = stop.clone();
+        let packets_ref = packets.clone();
+        let handle = thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while !stop_flag.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut buf) {
+                    Ok((read, peer)) => {
+                        packets_ref
+                            .lock()
+                            .expect("lock recording packets")
+                            .push(buf[..read].to_vec());
+                        let _ = socket.send_to(&buf[..read], peer);
+                    }
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            addr,
+            packets,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    fn packets(&self) -> Vec<Vec<u8>> {
+        self.packets.lock().expect("lock recorded packets").clone()
+    }
+}
+
+impl Drop for RecordingUdpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let wake = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind recording udp wake socket");
+        let _ = wake.send_to(b"wake", self.addr);
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("join recording udp listener");
+        }
+    }
+}
+
 struct ProxyProcess {
     port: u16,
     child: Child,
@@ -305,29 +464,61 @@ struct ProxyProcess {
 
 impl ProxyProcess {
     fn start(extra_args: &[&str]) -> Self {
-        Self::start_from_args(extra_args.iter().copied())
+        Self::start_with_conn_ip(extra_args, "127.0.0.1")
+    }
+
+    fn start_with_conn_ip(extra_args: &[&str], conn_ip: &str) -> Self {
+        Self::start_from_args(extra_args.iter().copied(), conn_ip)
     }
 
     fn start_owned(extra_args: Vec<String>) -> Self {
-        Self::start_from_args(extra_args.iter().map(String::as_str))
+        Self::start_configured(
+            free_port(),
+            true,
+            "127.0.0.1",
+            extra_args,
+            Vec::new(),
+        )
     }
 
-    fn start_from_args<'a>(extra_args: impl IntoIterator<Item = &'a str>) -> Self {
-        let port = free_port();
+    fn start_env(port: u16, env_updates: Vec<(String, String)>) -> Self {
+        Self::start_configured(port, false, "127.0.0.1", Vec::new(), env_updates)
+    }
+
+    fn start_from_args<'a>(extra_args: impl IntoIterator<Item = &'a str>, conn_ip: &str) -> Self {
+        Self::start_configured(
+            free_port(),
+            true,
+            conn_ip,
+            extra_args.into_iter().map(str::to_owned).collect(),
+            Vec::new(),
+        )
+    }
+
+    fn start_configured(
+        port: u16,
+        include_listen_args: bool,
+        conn_ip: &str,
+        extra_args: Vec<String>,
+        env_updates: Vec<(String, String)>,
+    ) -> Self {
         let log_path = unique_log_path();
         let stdout = File::create(&log_path).expect("create proxy log");
         let stderr = stdout.try_clone().expect("clone proxy log");
         let mut command = Command::new(rust_bin());
-        command
-            .arg("-i")
-            .arg("127.0.0.1")
-            .arg("-p")
-            .arg(port.to_string())
-            .arg("-I")
-            .arg("127.0.0.1")
-            .args(extra_args)
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
+        if include_listen_args {
+            command
+                .arg("-i")
+                .arg("127.0.0.1")
+                .arg("-p")
+                .arg(port.to_string())
+                .arg("-I")
+                .arg(conn_ip);
+        }
+        command.args(extra_args).stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr));
+        for (key, value) in env_updates {
+            command.env(key, value);
+        }
         let child = command.spawn().expect("spawn proxy");
         let mut process = Self {
             port,
@@ -379,6 +570,18 @@ fn socks5_echo_round_trip() {
 }
 
 #[test]
+fn socks5_ipv6_echo_round_trip() {
+    let Some(echo) = EchoServerV6::start() else {
+        return;
+    };
+    let proxy = ProxyProcess::start_with_conn_ip(&[], "::");
+    let mut stream = socks_connect_ipv6(proxy.port, Ipv6Addr::LOCALHOST, echo.port());
+    let payload = b"plain socks ipv6 payload";
+    stream.write_all(payload).expect("write ipv6 echo payload");
+    assert_eq!(recv_exact(&mut stream, payload.len()), payload);
+}
+
+#[test]
 fn socks4_echo_round_trip() {
     let echo = EchoServer::start();
     let proxy = ProxyProcess::start(&[]);
@@ -396,6 +599,32 @@ fn http_connect_echo_round_trip() {
     let payload = b"http connect payload";
     stream.write_all(payload).expect("write connect payload");
     assert_eq!(recv_exact(&mut stream, payload.len()), payload);
+}
+
+#[test]
+fn http_connect_failure_returns_503() {
+    let proxy = ProxyProcess::start(&["-G"]);
+    let closed_port = free_port();
+    let response = http_connect_raw(
+        proxy.port,
+        &format!(
+            "CONNECT 127.0.0.1:{closed_port} HTTP/1.1\r\nHost: 127.0.0.1:{closed_port}\r\n\r\n"
+        ),
+    );
+    assert!(
+        response.contains("HTTP/1.1 503 Fail"),
+        "unexpected HTTP CONNECT failure response: {response}"
+    );
+}
+
+#[test]
+fn invalid_http_connect_request_returns_503() {
+    let proxy = ProxyProcess::start(&["-G"]);
+    let response = http_connect_raw(proxy.port, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(
+        response.contains("HTTP/1.1 503 Fail"),
+        "unexpected invalid HTTP CONNECT response: {response}"
+    );
 }
 
 #[test]
@@ -424,6 +653,20 @@ fn socks5_udp_associate_round_trip() {
     let (_control, relay) = socks_udp_associate(proxy.port);
     let payload = b"udp proxy payload";
     assert_eq!(udp_proxy_roundtrip(relay, echo.port(), payload), payload);
+}
+
+#[test]
+fn udp_fake_burst_reaches_server_before_payload() {
+    let echo = RecordingUdpServer::start();
+    let proxy = ProxyProcess::start(&["--udp-fake", "2"]);
+    let (_control, relay) = socks_udp_associate(proxy.port);
+    let payload = b"udp payload after fakes";
+    assert_eq!(udp_proxy_roundtrip(relay, echo.port(), payload), payload);
+    let packets = echo.packets();
+    assert!(packets.len() >= 3, "expected at least 3 packets, got {}", packets.len());
+    assert_eq!(packets[0], vec![0u8; 64]);
+    assert_eq!(packets[1], vec![0u8; 64]);
+    assert_eq!(packets.last().expect("final packet"), payload);
 }
 
 #[test]
@@ -456,6 +699,71 @@ fn connect_failure_does_not_create_a_working_tunnel() {
 }
 
 #[test]
+fn max_conn_limit_rejects_excess_connections() {
+    let echo = EchoServer::start();
+    let proxy = ProxyProcess::start(&["--max-conn", "1"]);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let first = loop {
+        match TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port)) {
+            Ok(mut stream) => {
+                stream
+                    .write_all(b"\x05\x01\x00")
+                    .expect("write initial auth negotiation");
+                let mut auth_reply = [0u8; 2];
+                match stream.read(&mut auth_reply) {
+                    Ok(2) if auth_reply == [0x05, 0x00] => {
+                        let mut request = Vec::from([0x05, 0x01, 0x00, 0x01]);
+                        request.extend(Ipv4Addr::LOCALHOST.octets());
+                        request.extend(echo.port().to_be_bytes());
+                        stream.write_all(&request).expect("write first connect request");
+                        let reply = recv_socks5_reply(&mut stream);
+                        assert_eq!(reply[1], 0, "SOCKS5 connect failed: {reply:?}");
+                        break stream;
+                    }
+                    Ok(_) | Err(_) => {}
+                }
+            }
+            Err(_) => {}
+        }
+        assert!(Instant::now() < deadline, "timed out acquiring first max-conn slot");
+        thread::sleep(Duration::from_millis(50));
+    };
+    let mut second =
+        TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port)).expect("connect second client");
+    second
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set second read timeout");
+    second
+        .write_all(b"\x05\x01\x00")
+        .expect("write second auth negotiation");
+    let mut auth_reply = [0u8; 2];
+    let read_result = second.read(&mut auth_reply);
+    drop(first);
+    match read_result {
+        Ok(2) => assert_ne!(
+            auth_reply,
+            [0x05, 0x00],
+            "max-conn allowed second SOCKS auth reply"
+        ),
+        Ok(_) | Err(_) => {}
+    }
+}
+
+#[test]
+fn connection_churn_echo_round_trip() {
+    let echo = EchoServer::start();
+    let proxy = ProxyProcess::start(&[]);
+    for idx in 0..25 {
+        let mut stream = socks_connect(proxy.port, echo.port());
+        let payload = format!("burst-{idx}");
+        stream
+            .write_all(payload.as_bytes())
+            .expect("write churn payload");
+        assert_eq!(recv_exact(&mut stream, payload.len()), payload.as_bytes());
+    }
+}
+
+#[test]
 fn external_socks_chain_round_trip() {
     let echo = EchoServer::start();
     let upstream = ProxyProcess::start(&[]);
@@ -466,5 +774,26 @@ fn external_socks_chain_round_trip() {
     let mut stream = socks_connect(proxy.port, echo.port());
     let payload = b"chained socks payload";
     stream.write_all(payload).expect("write chain payload");
+    assert_eq!(recv_exact(&mut stream, payload.len()), payload);
+}
+
+#[test]
+fn shadowsocks_env_mode_tunnels_initial_payload() {
+    let echo = EchoServer::start();
+    let port = free_port();
+    let proxy = ProxyProcess::start_env(
+        port,
+        vec![("SS_LOCAL_PORT".to_string(), port.to_string())],
+    );
+    let mut stream =
+        TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port)).expect("connect to shadowsocks mode");
+    let payload = b"shadow";
+    let mut request = Vec::from([0x01]);
+    request.extend(Ipv4Addr::LOCALHOST.octets());
+    request.extend(echo.port().to_be_bytes());
+    request.extend(payload);
+    stream
+        .write_all(&request)
+        .expect("write shadowsocks bootstrap request");
     assert_eq!(recv_exact(&mut stream, payload.len()), payload);
 }
