@@ -1810,3 +1810,269 @@ fn mio_to_std_stream(stream: mio::net::TcpStream) -> TcpStream {
     // transferred directly into the std stream without duplication.
     unsafe { TcpStream::from_raw_socket(socket) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ciadpi_config::{DesyncMode, OffsetExpr, PartSpec};
+    use ciadpi_packets::DEFAULT_FAKE_TLS;
+    use std::io::{Read, Write};
+
+    fn connected_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let client = TcpStream::connect(addr).expect("connect client");
+        let (server, _) = listener.accept().expect("accept client");
+        (client, server)
+    }
+
+    fn test_group() -> DesyncGroup {
+        DesyncGroup::new(0)
+    }
+
+    fn test_offset() -> OffsetExpr {
+        OffsetExpr {
+            pos: 0,
+            flag: 0,
+            repeats: 0,
+            skip: 0,
+        }
+    }
+
+    #[test]
+    fn client_slot_guard_enforces_limit_and_releases_slot() {
+        let active = Arc::new(AtomicUsize::new(0));
+
+        let guard = ClientSlotGuard::acquire(active.clone(), 1).expect("first slot");
+        assert_eq!(active.load(Ordering::Relaxed), 1);
+        assert!(ClientSlotGuard::acquire(active.clone(), 1).is_none());
+
+        drop(guard);
+        assert_eq!(active.load(Ordering::Relaxed), 0);
+        assert!(ClientSlotGuard::acquire(active, 1).is_some());
+    }
+
+    #[test]
+    fn send_success_reply_emits_protocol_specific_payloads() {
+        let cases = [
+            (
+                HandshakeKind::Socks4,
+                encode_socks4_reply(true).as_bytes().to_vec(),
+            ),
+            (
+                HandshakeKind::Socks5,
+                encode_socks5_reply(0, SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            (
+                HandshakeKind::HttpConnect,
+                encode_http_connect_reply(true).as_bytes().to_vec(),
+            ),
+        ];
+
+        for (handshake, expected) in cases {
+            let (mut writer, mut reader) = connected_pair();
+            reader
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("set read timeout");
+
+            send_success_reply(&mut writer, handshake).expect("send success reply");
+
+            let mut actual = vec![0u8; expected.len()];
+            reader.read_exact(&mut actual).expect("read success reply");
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn read_socks5_request_reads_domain_target() {
+        let (mut reader, mut writer) = connected_pair();
+        let request = [
+            S_VER5,
+            S_CMD_CONN,
+            0,
+            0x03,
+            11,
+            b'e',
+            b'x',
+            b'a',
+            b'm',
+            b'p',
+            b'l',
+            b'e',
+            b'.',
+            b'c',
+            b'o',
+            b'm',
+            0x01,
+            0xbb,
+        ];
+        writer.write_all(&request).expect("write socks5 request");
+
+        assert_eq!(
+            read_socks5_request(&mut reader).expect("read socks5 request"),
+            request
+        );
+    }
+
+    #[test]
+    fn parse_shadowsocks_target_handles_ipv4_and_resolved_domain_targets() {
+        let config = RuntimeConfig::default();
+        let ipv4_packet = [S_ATP_I4, 127, 0, 0, 1, 0x01, 0xbb];
+        let (ipv4_target, ipv4_header_len) =
+            parse_shadowsocks_target(&ipv4_packet, &config).expect("parse ipv4 target");
+        assert_eq!(
+            ipv4_target,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443)
+        );
+        assert_eq!(ipv4_header_len, ipv4_packet.len());
+
+        let domain_packet = [
+            0x03,
+            9,
+            b'1',
+            b'2',
+            b'7',
+            b'.',
+            b'0',
+            b'.',
+            b'0',
+            b'.',
+            b'1',
+            0x00,
+            0x50,
+        ];
+        let (domain_target, domain_header_len) =
+            parse_shadowsocks_target(&domain_packet, &config).expect("parse domain target");
+        assert_eq!(
+            domain_target,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 80)
+        );
+        assert_eq!(domain_header_len, domain_packet.len());
+    }
+
+    #[test]
+    fn parse_shadowsocks_target_respects_ipv6_and_resolve_flags() {
+        let config = RuntimeConfig {
+            ipv6: false,
+            resolve: false,
+            ..RuntimeConfig::default()
+        };
+        let ipv6_packet = [
+            S_ATP_I6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 53,
+        ];
+        let domain_packet = [0x03, 9, b'1', b'2', b'7', b'.', b'0', b'.', b'0', b'.', b'1', 0, 80];
+
+        assert!(parse_shadowsocks_target(&ipv6_packet, &config).is_none());
+        assert!(parse_shadowsocks_target(&domain_packet, &config).is_none());
+    }
+
+    #[test]
+    fn udp_packet_round_trip_preserves_sender_and_payload() {
+        let config = RuntimeConfig::default();
+        let sender = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 5353);
+        let payload = b"dns-payload";
+        let packet = encode_socks5_udp_packet(sender, payload);
+
+        let (decoded_sender, decoded_payload) =
+            parse_socks5_udp_packet(&packet, &config).expect("parse udp relay packet");
+        assert_eq!(decoded_sender, sender);
+        assert_eq!(decoded_payload, payload);
+    }
+
+    #[test]
+    fn encode_upstream_socks_connect_encodes_ipv6_targets() {
+        let target = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080);
+        let encoded = encode_upstream_socks_connect(target);
+
+        assert_eq!(encoded[..4], [S_VER5, S_CMD_CONN, 0, S_ATP_I6]);
+        assert_eq!(&encoded[4..20], &Ipv6Addr::LOCALHOST.octets());
+        assert_eq!(&encoded[20..22], &8080u16.to_be_bytes());
+    }
+
+    #[test]
+    fn timeout_and_trigger_helpers_follow_runtime_configuration() {
+        let mut config = RuntimeConfig {
+            partial_timeout_ms: 75,
+            timeout_ms: 900,
+            ..RuntimeConfig::default()
+        };
+        let tls_tracker = TlsRecordTracker::new(DEFAULT_FAKE_TLS, &config);
+        assert_eq!(
+            first_response_timeout(&config, &tls_tracker),
+            Some(Duration::from_millis(75))
+        );
+
+        config.partial_timeout_ms = 0;
+        let inactive_tracker = TlsRecordTracker::new(DEFAULT_FAKE_TLS, &config);
+        assert_eq!(
+            first_response_timeout(&config, &inactive_tracker),
+            Some(Duration::from_millis(900))
+        );
+
+        config.timeout_ms = 0;
+        config.groups[0].detect = DETECT_HTTP_LOCAT | DETECT_CONNECT;
+        assert_eq!(
+            first_response_timeout(&config, &inactive_tracker),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(timeout_count_limit(&config), 1);
+        assert!(response_trigger_supported(&config, TriggerEvent::Redirect));
+        assert!(response_trigger_supported(&config, TriggerEvent::Connect));
+        assert!(!response_trigger_supported(&config, TriggerEvent::Torst));
+        assert_eq!(trigger_flag(TriggerEvent::SslErr), DETECT_TLS_ERR);
+        assert_eq!(trigger_flag(TriggerEvent::Torst), DETECT_TORST);
+
+        config.groups[0].detect = 0;
+        assert_eq!(first_response_timeout(&config, &inactive_tracker), None);
+    }
+
+    #[test]
+    fn tls_record_tracker_handles_partial_records_and_limits() {
+        let config = RuntimeConfig {
+            partial_timeout_ms: 50,
+            ..RuntimeConfig::default()
+        };
+
+        let mut tracker = TlsRecordTracker::new(DEFAULT_FAKE_TLS, &config);
+        assert!(tracker.active());
+        tracker.observe(&[0x16, 0x03, 0x03, 0x00, 0x05, 0xaa]);
+        assert!(tracker.waiting_for_tls_record());
+        tracker.observe(&[0xbb, 0xcc, 0xdd, 0xee]);
+        assert!(!tracker.waiting_for_tls_record());
+
+        let limited_config = RuntimeConfig {
+            partial_timeout_ms: 50,
+            timeout_bytes_limit: 3,
+            ..RuntimeConfig::default()
+        };
+        let mut limited = TlsRecordTracker::new(DEFAULT_FAKE_TLS, &limited_config);
+        limited.observe(&[0x16, 0x03, 0x03, 0x00]);
+        assert!(!limited.active());
+
+        let mut invalid = TlsRecordTracker::new(DEFAULT_FAKE_TLS, &config);
+        invalid.observe(&[0x13, 0x03, 0x03, 0x00, 0x01, 0x00]);
+        assert!(!invalid.active());
+    }
+
+    #[test]
+    fn tcp_desync_helpers_require_actionable_groups_and_matching_rounds() {
+        let mut group = test_group();
+        group.rounds = [2, 4];
+
+        assert!(!has_tcp_actions(&group));
+        assert!(!should_desync_tcp(&group, 2));
+        assert!(!check_round(group.rounds, 1));
+        assert!(check_round(group.rounds, 3));
+        assert!(!check_round(group.rounds, 5));
+
+        group.parts.push(PartSpec {
+            mode: DesyncMode::Split,
+            offset: test_offset(),
+        });
+        assert!(has_tcp_actions(&group));
+        assert!(should_desync_tcp(&group, 2));
+        assert!(!should_desync_tcp(&group, 5));
+    }
+}

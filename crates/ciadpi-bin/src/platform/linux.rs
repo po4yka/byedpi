@@ -559,3 +559,88 @@ fn write_region(region: *mut u8, data: &[u8], len: usize) {
         ptr::copy_nonoverlapping(data.as_ptr(), region, data.len().min(len));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::zeroed;
+    use std::slice;
+    use std::net::TcpListener;
+
+    fn connected_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let client = TcpStream::connect(addr).expect("connect client");
+        let (server, _) = listener.accept().expect("accept client");
+        (client, server)
+    }
+
+    #[test]
+    fn storage_to_socket_addr_parses_ipv4_and_ipv6_sockaddrs() {
+        let mut storage = unsafe { zeroed::<libc::sockaddr_storage>() };
+        let sin = unsafe {
+            &mut *(&mut storage as *mut libc::sockaddr_storage).cast::<libc::sockaddr_in>()
+        };
+        sin.sin_family = libc::AF_INET as libc::sa_family_t;
+        sin.sin_port = 443u16.to_be();
+        sin.sin_addr = libc::in_addr {
+            s_addr: u32::from(Ipv4Addr::new(203, 0, 113, 8)).to_be(),
+        };
+        assert_eq!(
+            storage_to_socket_addr(&storage).expect("parse ipv4 sockaddr"),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8)), 443)
+        );
+
+        let mut storage6 = unsafe { zeroed::<libc::sockaddr_storage>() };
+        let sin6 = unsafe {
+            &mut *(&mut storage6 as *mut libc::sockaddr_storage).cast::<libc::sockaddr_in6>()
+        };
+        sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+        sin6.sin6_port = 8443u16.to_be();
+        sin6.sin6_addr = libc::in6_addr {
+            s6_addr: Ipv6Addr::LOCALHOST.octets(),
+        };
+        assert_eq!(
+            storage_to_socket_addr(&storage6).expect("parse ipv6 sockaddr"),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8443)
+        );
+    }
+
+    #[test]
+    fn storage_to_socket_addr_rejects_unknown_families() {
+        let mut storage = unsafe { zeroed::<libc::sockaddr_storage>() };
+        storage.ss_family = libc::AF_UNIX as libc::sa_family_t;
+
+        let err = storage_to_socket_addr(&storage).expect_err("reject unsupported family");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn set_tcp_md5sig_rejects_key_lengths_above_linux_limit() {
+        let (client, _server) = connected_pair();
+        let err = set_tcp_md5sig(&client, 81).expect_err("reject oversized md5 key");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn invalid_fds_report_errors_for_tcp_state_helpers() {
+        let err = tcp_has_notsent(-1).expect_err("invalid fd should fail");
+        assert_eq!(err.kind(), io::ErrorKind::Uncategorized);
+
+        let err = wait_tcp_stage_fd(-1, false, Duration::ZERO).expect_err("invalid fd should fail");
+        assert_eq!(err.kind(), io::ErrorKind::Uncategorized);
+    }
+
+    #[test]
+    fn alloc_and_write_region_round_trip_bytes() {
+        let len = 8usize;
+        let region = alloc_region(len).expect("allocate region");
+        write_region(region, b"hello", len);
+
+        let bytes = unsafe { slice::from_raw_parts(region, len) };
+        assert_eq!(&bytes[..5], b"hello");
+        assert_eq!(&bytes[5..], &[0, 0, 0]);
+
+        free_region(region, len);
+    }
+}

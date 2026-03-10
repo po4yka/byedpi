@@ -400,3 +400,98 @@ pub fn plan_udp(group: &DesyncGroup, payload: &[u8], default_ttl: u8) -> Vec<Des
     }
     actions
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ciadpi_config::PartSpec;
+
+    fn split_expr(pos: i64) -> OffsetExpr {
+        OffsetExpr {
+            pos,
+            flag: 0,
+            repeats: 1,
+            skip: 0,
+        }
+    }
+
+    #[test]
+    fn plan_tcp_split_emits_chunk_and_tail_actions() {
+        let mut group = DesyncGroup::new(0);
+        group.parts.push(PartSpec {
+            mode: DesyncMode::Split,
+            offset: split_expr(5),
+        });
+        let payload = b"hello world";
+
+        let plan = plan_tcp(&group, payload, 7, 64).expect("plan split tcp");
+
+        assert_eq!(plan.tampered, payload);
+        assert_eq!(
+            plan.steps,
+            vec![PlannedStep {
+                mode: DesyncMode::Split,
+                start: 0,
+                end: 5,
+            }]
+        );
+        assert_eq!(
+            plan.actions,
+            vec![
+                DesyncAction::Write(b"hello".to_vec()),
+                DesyncAction::AwaitWritable,
+                DesyncAction::Write(b" world".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_tcp_fake_uses_fake_chunk_then_original_tail() {
+        let mut group = DesyncGroup::new(0);
+        group.ttl = Some(9);
+        group.fake_data = Some(b"FAKEPAYLOAD".to_vec());
+        group.parts.push(PartSpec {
+            mode: DesyncMode::Fake,
+            offset: split_expr(4),
+        });
+        let payload = b"hello world";
+
+        let plan = plan_tcp(&group, payload, 3, 32).expect("plan fake tcp");
+
+        assert_eq!(
+            plan.actions,
+            vec![
+                DesyncAction::SetTtl(9),
+                DesyncAction::Write(b"FAKE".to_vec()),
+                DesyncAction::RestoreDefaultTtl,
+                DesyncAction::SetTtl(32),
+                DesyncAction::Write(b"o world".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_udp_wraps_fake_burst_and_drop_sack_actions() {
+        let mut group = DesyncGroup::new(0);
+        group.drop_sack = true;
+        group.udp_fake_count = 2;
+        group.ttl = Some(7);
+        group.fake_data = Some(b"udp-fake".to_vec());
+
+        let actions = plan_udp(&group, b"payload", 64);
+
+        assert_eq!(
+            actions,
+            vec![
+                DesyncAction::AttachDropSack,
+                DesyncAction::SetTtl(7),
+                DesyncAction::Write(b"udp-fake".to_vec()),
+                DesyncAction::Write(b"udp-fake".to_vec()),
+                DesyncAction::RestoreDefaultTtl,
+                DesyncAction::SetTtl(64),
+                DesyncAction::Write(b"payload".to_vec()),
+                DesyncAction::DetachDropSack,
+            ]
+        );
+    }
+}

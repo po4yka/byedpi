@@ -402,3 +402,97 @@ pub fn detect_response_trigger(request: &[u8], response: &[u8]) -> Option<Trigge
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolver(host: &str, socket_type: SocketType) -> Option<SocketAddr> {
+        match (host, socket_type) {
+            ("example.com", SocketType::Stream) => Some(SocketAddr::from(([198, 51, 100, 10], 0))),
+            ("example.net", SocketType::Datagram) => Some(SocketAddr::from(([198, 51, 100, 20], 0))),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn parse_socks4_request_resolves_domain_targets() {
+        let mut request = vec![S_VER4, S_CMD_CONN, 0x01, 0xbb, 0, 0, 0, 1];
+        request.extend_from_slice(b"user");
+        request.push(0);
+        request.extend_from_slice(b"example.com");
+        request.push(0);
+
+        let parsed =
+            parse_socks4_request(&request, SessionConfig::default(), &resolver).expect("parse socks4");
+
+        assert_eq!(
+            parsed,
+            ClientRequest::Socks4Connect(TargetAddr {
+                addr: SocketAddr::from(([198, 51, 100, 10], 443)),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_socks5_request_resolves_domains_for_datagram_mode() {
+        let mut request = vec![S_VER5, S_CMD_AUDP, 0, S_ATP_ID, 11];
+        request.extend_from_slice(b"example.net");
+        request.extend_from_slice(&8080u16.to_be_bytes());
+
+        let parsed = parse_socks5_request(
+            &request,
+            SocketType::Datagram,
+            SessionConfig::default(),
+            &resolver,
+        )
+        .expect("parse socks5");
+
+        assert_eq!(
+            parsed,
+            ClientRequest::Socks5UdpAssociate(TargetAddr {
+                addr: SocketAddr::from(([198, 51, 100, 20], 8080)),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_http_connect_request_uses_host_header() {
+        let request = b"CONNECT ignored HTTP/1.1\r\nHost: example.com:8443\r\n\r\n";
+        let parsed = parse_http_connect_request(request, &resolver).expect("parse connect");
+
+        assert_eq!(
+            parsed,
+            ClientRequest::HttpConnect(TargetAddr {
+                addr: SocketAddr::from(([198, 51, 100, 10], 8443)),
+            })
+        );
+    }
+
+    #[test]
+    fn encode_socks5_reply_encodes_address_and_port() {
+        let reply = encode_socks5_reply(S_ER_OK, SocketAddr::from(([127, 0, 0, 1], 1080)));
+
+        assert_eq!(
+            reply.as_bytes(),
+            &[S_VER5, S_ER_OK, 0, S_ATP_I4, 127, 0, 0, 1, 0x04, 0x38]
+        );
+    }
+
+    #[test]
+    fn session_state_tracks_rounds_and_resets_after_inbound() {
+        let mut state = SessionState::default();
+
+        state.observe_outbound(b"hello");
+        state.observe_outbound(b"world");
+        assert_eq!(state.round_count, 1);
+        assert_eq!(state.sent_this_round, 10);
+
+        assert_eq!(state.observe_inbound(b"reply"), None);
+        assert_eq!(state.recv_count, 5);
+        assert_eq!(state.sent_this_round, 0);
+
+        state.observe_outbound(b"next");
+        assert_eq!(state.round_count, 2);
+    }
+}

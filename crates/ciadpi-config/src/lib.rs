@@ -1130,3 +1130,66 @@ pub fn dump_cache_entries(entries: &[CacheEntry]) -> String {
 pub fn config_path(name: impl Into<PathBuf>) -> PathBuf {
     name.into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hosts_spec_normalizes_and_skips_invalid_tokens() {
+        let hosts = parse_hosts_spec("Example.COM bad^host api-1.test")
+            .expect("parse hosts spec");
+
+        assert_eq!(hosts, vec!["example.com", "api-1.test"]);
+    }
+
+    #[test]
+    fn parse_ipset_spec_defaults_and_clamps_prefix_lengths() {
+        let entries = parse_ipset_spec("192.0.2.1 2001:db8::1/129").expect("parse ipset spec");
+
+        assert_eq!(
+            entries,
+            vec![
+                Cidr {
+                    addr: IpAddr::from_str("192.0.2.1").expect("ipv4 addr"),
+                    bits: 32,
+                },
+                Cidr {
+                    addr: IpAddr::from_str("2001:db8::1").expect("ipv6 addr"),
+                    bits: 128,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn prefix_match_bytes_honors_partial_bits() {
+        assert!(prefix_match_bytes(&[0b1011_0000], &[0b1011_1111], 4));
+        assert!(!prefix_match_bytes(&[0b1011_0000], &[0b1001_1111], 4));
+    }
+
+    #[test]
+    fn cache_entries_round_trip_through_text_format() {
+        let entries = vec![
+            CacheEntry {
+                addr: IpAddr::from_str("192.0.2.10").expect("ipv4 addr"),
+                bits: 24,
+                port: 443,
+                time: 123,
+                host: Some("example.com".to_string()),
+            },
+            CacheEntry {
+                addr: IpAddr::from_str("2001:db8::10").expect("ipv6 addr"),
+                bits: 128,
+                port: 80,
+                time: 456,
+                host: None,
+            },
+        ];
+
+        let dumped = dump_cache_entries(&entries);
+        let loaded = load_cache_entries(&dumped);
+
+        assert_eq!(loaded, entries);
+    }
+}

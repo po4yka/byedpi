@@ -6,6 +6,8 @@ use std::io::Write;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ciadpi_config::RuntimeConfig;
 
@@ -104,8 +106,8 @@ impl PidFileGuard {
             .open(path)?;
 
         let mut lock = libc::flock {
-            l_type: libc::F_WRLCK,
-            l_whence: libc::SEEK_CUR as i16,
+            l_type: libc::F_WRLCK as _,
+            l_whence: libc::SEEK_CUR as _,
             l_start: 0,
             l_len: 0,
             l_pid: 0,
@@ -136,3 +138,46 @@ impl Drop for PidFileGuard {
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_pid_path() -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("ciadpi-process-{stamp}.pid"))
+    }
+
+    #[test]
+    fn prepare_resets_shutdown_state() {
+        request_shutdown();
+        assert!(shutdown_requested());
+
+        let guard = ProcessGuard::prepare(&RuntimeConfig::default()).expect("prepare process guard");
+
+        assert!(!shutdown_requested());
+        drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_with_pid_file_writes_and_removes_pidfile() {
+        let path = temp_pid_path();
+        let config = RuntimeConfig {
+            pid_file: Some(path.display().to_string()),
+            ..RuntimeConfig::default()
+        };
+
+        {
+            let guard = ProcessGuard::prepare(&config).expect("prepare process guard with pidfile");
+            let contents = std::fs::read_to_string(&path).expect("pidfile contents");
+            assert_eq!(contents, std::process::id().to_string());
+            drop(guard);
+        }
+
+        assert!(!path.exists(), "pidfile should be removed on drop");
+    }
+}

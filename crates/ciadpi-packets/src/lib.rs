@@ -853,6 +853,41 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn parse_tls_extracts_default_fake_sni() {
+        assert!(is_tls_client_hello(DEFAULT_FAKE_TLS));
+        assert_eq!(parse_tls(DEFAULT_FAKE_TLS), Some(&b"www.wikipedia.org"[..]));
+    }
+
+    #[test]
+    fn parse_http_extracts_host_and_port() {
+        let request = b"GET / HTTP/1.1\r\nHost: example.com:8080\r\n\r\n";
+        let parsed = parse_http(request).expect("parse http host header");
+
+        assert_eq!(parsed.host, b"example.com");
+        assert_eq!(parsed.port, 8080);
+    }
+
+    #[test]
+    fn http_redirect_detection_uses_host_suffix() {
+        let request = b"GET / HTTP/1.1\r\nHost: api.example.com\r\n\r\n";
+        let redirect = b"HTTP/1.1 302 Found\r\nLocation: https://login.other.net/path\r\n\r\n";
+        let same_site = b"HTTP/1.1 302 Found\r\nLocation: https://cdn.example.com/path\r\n\r\n";
+
+        assert!(is_http_redirect(request, redirect));
+        assert!(!is_http_redirect(request, same_site));
+    }
+
+    #[test]
+    fn mod_http_like_c_applies_header_and_domain_mixing() {
+        let input = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mutation = mod_http_like_c(input, MH_HMIX | MH_DMIX);
+        let output = std::str::from_utf8(&mutation.bytes).expect("http mutation utf8");
+
+        assert_eq!(mutation.rc, 0);
+        assert!(output.contains("\r\nhOsT: ExAmPlE.CoM\r\n"));
+    }
+
     proptest! {
         #[test]
         fn parse_http_never_panics(data in proptest::collection::vec(any::<u8>(), 0..512)) {

@@ -176,3 +176,66 @@ pub fn wait_tcp_stage(
     #[cfg(not(target_os = "windows"))]
     stub::wait_tcp_stage(stream, wait_send, await_interval)
 }
+
+#[cfg(all(test, not(any(target_os = "linux", target_os = "windows"))))]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    fn connected_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let client = TcpStream::connect(addr).expect("connect client");
+        let (server, _) = listener.accept().expect("accept client");
+        (client, server)
+    }
+
+    #[test]
+    fn detect_default_ttl_returns_a_valid_u8() {
+        let ttl = detect_default_ttl().expect("detect default ttl");
+        assert!(ttl > 0);
+    }
+
+    #[test]
+    fn public_facade_uses_stub_send_fake_tcp_contract() {
+        let (client, mut server) = connected_pair();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set read timeout");
+
+        send_fake_tcp(
+            &client,
+            b"original",
+            b"fake-prefix",
+            0,
+            false,
+            0,
+            (true, Duration::from_millis(1)),
+        )
+        .expect("send fake tcp through facade");
+
+        let mut buf = [0u8; 11];
+        server.read_exact(&mut buf).expect("read fake prefix");
+        assert_eq!(&buf, b"fake-prefix");
+    }
+
+    #[test]
+    fn public_facade_reports_stub_unsupported_calls() {
+        let (client, _server) = connected_pair();
+
+        assert_eq!(
+            enable_tcp_fastopen_connect(&client)
+                .expect_err("tfo should be unsupported")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            original_dst(&client)
+                .expect_err("original dst should be unsupported")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        wait_tcp_stage(&client, true, Duration::from_millis(1)).expect("wait tcp stage no-op");
+    }
+}
