@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -89,6 +89,19 @@ fn socks_connect_domain(proxy_port: u16, host: &str, dst_port: u16) -> (TcpStrea
     (stream, reply)
 }
 
+fn socks4_connect(proxy_port: u16, dst_port: u16) -> TcpStream {
+    let mut stream =
+        TcpStream::connect((Ipv4Addr::LOCALHOST, proxy_port)).expect("connect to proxy");
+    let mut request = Vec::from([0x04, 0x01]);
+    request.extend(dst_port.to_be_bytes());
+    request.extend(Ipv4Addr::LOCALHOST.octets());
+    request.extend(b"user\x00");
+    stream.write_all(&request).expect("write socks4 connect");
+    let reply = recv_exact(&mut stream, 8);
+    assert_eq!(reply[1], 0x5a, "SOCKS4 connect failed: {reply:?}");
+    stream
+}
+
 fn http_connect(proxy_port: u16, dst_port: u16) -> TcpStream {
     let mut stream =
         TcpStream::connect((Ipv4Addr::LOCALHOST, proxy_port)).expect("connect to proxy");
@@ -110,6 +123,60 @@ fn http_connect(proxy_port: u16, dst_port: u16) -> TcpStream {
         "http connect failed: {response}"
     );
     stream
+}
+
+fn parse_socks5_reply_addr(reply: &[u8]) -> SocketAddr {
+    match reply[3] {
+        0x01 => SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(reply[4], reply[5], reply[6], reply[7])),
+            u16::from_be_bytes([reply[8], reply[9]]),
+        ),
+        0x04 => SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::from([
+                reply[4], reply[5], reply[6], reply[7], reply[8], reply[9], reply[10], reply[11],
+                reply[12], reply[13], reply[14], reply[15], reply[16], reply[17], reply[18],
+                reply[19],
+            ])),
+            u16::from_be_bytes([reply[20], reply[21]]),
+        ),
+        atyp => panic!("unsupported SOCKS5 reply address type: {atyp}"),
+    }
+}
+
+fn socks_udp_associate(proxy_port: u16) -> (TcpStream, SocketAddr) {
+    let mut stream = socks_auth(proxy_port);
+    let mut request = Vec::from([0x05, 0x03, 0x00, 0x01]);
+    request.extend([0, 0, 0, 0]);
+    request.extend([0, 0]);
+    stream.write_all(&request).expect("write udp associate");
+    let reply = recv_socks5_reply(&mut stream);
+    assert_eq!(reply[1], 0, "SOCKS5 UDP associate failed: {reply:?}");
+    let relay = parse_socks5_reply_addr(&reply);
+    (stream, relay)
+}
+
+fn udp_proxy_roundtrip(relay: SocketAddr, dst_port: u16, payload: &[u8]) -> Vec<u8> {
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind udp client");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set udp client timeout");
+    let mut packet = Vec::from([0x00, 0x00, 0x00, 0x01]);
+    packet.extend(Ipv4Addr::LOCALHOST.octets());
+    packet.extend(dst_port.to_be_bytes());
+    packet.extend(payload);
+    socket
+        .send_to(&packet, relay)
+        .expect("send udp packet through proxy");
+    let mut buf = [0u8; 4096];
+    loop {
+        let (read, _) = socket.recv_from(&mut buf).expect("recv udp proxy response");
+        assert!(read >= 10, "udp response too short: {read}");
+        assert_eq!(&buf[..4], b"\x00\x00\x00\x01");
+        let body = &buf[10..read];
+        if body == payload {
+            return body.to_vec();
+        }
+    }
 }
 
 struct EchoServer {
@@ -176,6 +243,60 @@ impl Drop for EchoServer {
     }
 }
 
+struct UdpEchoServer {
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl UdpEchoServer {
+    fn start() -> Self {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind udp echo server");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("set udp echo timeout");
+        let addr = socket.local_addr().expect("udp echo listener addr");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = stop.clone();
+        let handle = thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while !stop_flag.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut buf) {
+                    Ok((read, peer)) => {
+                        let _ = socket.send_to(&buf[..read], peer);
+                    }
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            addr,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn port(&self) -> u16 {
+        self.addr.port()
+    }
+}
+
+impl Drop for UdpEchoServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let wake = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind udp wake socket");
+        let _ = wake.send_to(b"wake", self.addr);
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("join udp echo listener");
+        }
+    }
+}
+
 struct ProxyProcess {
     port: u16,
     child: Child,
@@ -184,6 +305,14 @@ struct ProxyProcess {
 
 impl ProxyProcess {
     fn start(extra_args: &[&str]) -> Self {
+        Self::start_from_args(extra_args.iter().copied())
+    }
+
+    fn start_owned(extra_args: Vec<String>) -> Self {
+        Self::start_from_args(extra_args.iter().map(String::as_str))
+    }
+
+    fn start_from_args<'a>(extra_args: impl IntoIterator<Item = &'a str>) -> Self {
         let port = free_port();
         let log_path = unique_log_path();
         let stdout = File::create(&log_path).expect("create proxy log");
@@ -250,6 +379,16 @@ fn socks5_echo_round_trip() {
 }
 
 #[test]
+fn socks4_echo_round_trip() {
+    let echo = EchoServer::start();
+    let proxy = ProxyProcess::start(&[]);
+    let mut stream = socks4_connect(proxy.port, echo.port());
+    let payload = b"plain socks4 payload";
+    stream.write_all(payload).expect("write echo payload");
+    assert_eq!(recv_exact(&mut stream, payload.len()), payload);
+}
+
+#[test]
 fn http_connect_echo_round_trip() {
     let echo = EchoServer::start();
     let proxy = ProxyProcess::start(&["-G"]);
@@ -264,6 +403,27 @@ fn no_domain_rejects_domain_requests() {
     let proxy = ProxyProcess::start(&["-N"]);
     let (_stream, reply) = socks_connect_domain(proxy.port, "localhost", 80);
     assert_ne!(reply[1], 0, "domain request unexpectedly succeeded: {reply:?}");
+}
+
+#[test]
+fn no_udp_rejects_udp_associate() {
+    let proxy = ProxyProcess::start(&["-U"]);
+    let mut stream = socks_auth(proxy.port);
+    let mut request = Vec::from([0x05, 0x03, 0x00, 0x01]);
+    request.extend([0, 0, 0, 0]);
+    request.extend([0, 0]);
+    stream.write_all(&request).expect("write udp associate");
+    let reply = recv_socks5_reply(&mut stream);
+    assert_ne!(reply[1], 0, "udp associate unexpectedly succeeded: {reply:?}");
+}
+
+#[test]
+fn socks5_udp_associate_round_trip() {
+    let echo = UdpEchoServer::start();
+    let proxy = ProxyProcess::start(&[]);
+    let (_control, relay) = socks_udp_associate(proxy.port);
+    let payload = b"udp proxy payload";
+    assert_eq!(udp_proxy_roundtrip(relay, echo.port(), payload), payload);
 }
 
 #[test]
@@ -293,4 +453,18 @@ fn connect_failure_does_not_create_a_working_tunnel() {
         Err(_) => {}
         Ok(read) => panic!("connect failure yielded a working tunnel: read {read} bytes"),
     }
+}
+
+#[test]
+fn external_socks_chain_round_trip() {
+    let echo = EchoServer::start();
+    let upstream = ProxyProcess::start(&[]);
+    let proxy = ProxyProcess::start_owned(vec![
+        "-C".to_string(),
+        format!("127.0.0.1:{}", upstream.port),
+    ]);
+    let mut stream = socks_connect(proxy.port, echo.port());
+    let payload = b"chained socks payload";
+    stream.write_all(payload).expect("write chain payload");
+    assert_eq!(recv_exact(&mut stream, payload.len()), payload);
 }
